@@ -1,0 +1,16 @@
+[build]
+  publish = "."
+
+# Inicio de sesión con Google (Firebase) - para cuando lo actives:
+# reemplazá TU-PROYECTO por el ID de tu proyecto de Firebase.
+[[redirects]]
+  from = "/__/auth/*"
+  to = "https://TU-PROYECTO.firebaseapp.com/__/auth/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/__/firebase/*"
+  to = "https://TU-PROYECTO.firebaseapp.com/__/firebase/:splat"
+  status = 200
+  force = true
