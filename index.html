@@ -1890,6 +1890,11 @@ html.theming,html.theming *{transition-duration:.3s!important;}
     try{ if(window.Chart&&Chart.defaults){ prevAnim=Chart.defaults.animation; hasPrev=true; Chart.defaults.animation=false; } }catch(e){}
     try{ var sc=doc.createElement('script'); sc.text=src.textContent; doc.body.appendChild(sc); }catch(e){ console.error(e); }
     src.remove();
+    /* las animaciones que dependen de la app (cambio de pantalla, cuadros) se activan cuando la app ya existe */
+    Array.prototype.slice.call(doc.querySelectorAll('script[data-late]')).forEach(function(l){
+      try{ var s2=doc.createElement('script'); s2.text=l.textContent; doc.body.appendChild(s2); }catch(e){ console.error(e); }
+      l.remove();
+    });
   }
   function reveal(){
     if(revealed) return; revealed=true;
@@ -2355,6 +2360,7 @@ function loadState(){
 let state = loadState();
 function migrateState(){
   if(!Array.isArray(state.goals)) state.goals = [];
+  if(!Array.isArray(state.challenges)) state.challenges = [];
   if(!Array.isArray(state.budgets)) state.budgets = [];
   if(!state.exchangeRate) state.exchangeRate = 6100;
   if(!Array.isArray(state.debts)) state.debts = [];
@@ -6140,16 +6146,26 @@ function saveGoal(id){
   save(); closeModal(); renderAll();
 }
 function deleteGoal(id){ if(!confirm('¿Eliminar esta meta?')) return; state.goals=state.goals.filter(g=>g.id!==id); if(state.settings.featuredGoal===id) state.settings.featuredGoal=null; save(); renderAll(); }
+function goalAccField(){
+  const opts=state.accounts.filter(a=>a.type==='ahorro').map(a=>`<option value="${a.id}">${escHtml(a.name)} (${money(a.balance)})</option>`).join('');
+  return `<div class="field"><label>Descontar de la cuenta</label><select id="goalAcc"><option value="">No descontar de ninguna cuenta</option>${opts}</select></div>`;
+}
 function openGoalSaveModal(id){
   const g=state.goals.find(x=>x.id===id);
   openModal('Sumar ahorro · '+escHtml(g.name),`<p style="margin-top:0;color:var(--text-muted);font-size:13.5px;">Falta <strong style="color:var(--text)">${money(Math.max(0,g.target-g.saved))}</strong></p>
-    <div class="field"><label>Monto a sumar (₲)</label><input type="number" id="goalAdd" min="0" placeholder="0"></div>`,
+    <div class="field"><label>Monto a sumar (₲)</label><input type="number" id="goalAdd" min="0" placeholder="0"></div>${goalAccField()}`,
     `<button class="btn btn-outline" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="saveGoalAdd('${id}')">Sumar</button>`);
 }
 function saveGoalAdd(id){
   const n=parseFloat(document.getElementById('goalAdd').value);
   if(!n||n<=0){ alert('Ingresá un monto válido.'); return; }
-  const g=state.goals.find(x=>x.id===id); g.saved+=n; save(); closeModal(); renderAll();
+  const g=state.goals.find(x=>x.id===id), accId=(document.getElementById('goalAcc')||{}).value||'', acc=accId?state.accounts.find(a=>a.id===accId):null;
+  if(acc){
+    if(acc.balance<n && !confirm('El monto supera el saldo de la cuenta. ¿Continuar?')) return;
+    acc.balance-=n;
+    state.transactions.push({id:uid(),type:'gasto',amount:n,date:todayISO(),category:'Ahorro',description:'Aporte a meta '+g.name,accountKind:'ahorro',accountId:acc.id});
+  }
+  g.saved+=n; save(); closeModal(); renderAll();
 }
 function goalsSummaryHtml(){
   if(!state.goals.length) return 'Todavía no tenés metas. Creá la primera en la pestaña Metas <i class=ui-target></i>';
@@ -6225,6 +6241,85 @@ function renderMetas(){
   if(others.length) html+=`<div class="sec-title">Otras metas</div><div class="card" style="padding:4px 18px;">${others.map(g=>`<div class="ring-row" onclick="setFeaturedGoal('${g.id}')">${ringSvg(goalPct(g),48,7,'var(--accent)','var(--accent-soft)')}<div style="flex:1;min-width:0;"><b>${escHtml(g.name)}</b><span class="row-sub">${goalPct(g)}% · ${money(g.saved)} de ${money(g.target)}</span></div><span class="muted"><i class=ui-chevR></i></span></div>`).join('')}</div>`;
   box.innerHTML=html;
 }
+
+/* ===== Retos de ahorro (dentro de Metas) ===== */
+let metaTab='metas', retoOpen=null;
+function rtList(){ if(!Array.isArray(state.challenges)) state.challenges=[]; return state.challenges; }
+function rtTotal(c){ return c.slots.reduce((s,a)=>s+a,0); }
+function rtSaved(c){ return c.slots.reduce((s,a,i)=>s+(c.done[i]?a:0),0); }
+function rtCount(c){ return c.done.filter(Boolean).length; }
+function rtShort(n){ n=Math.round(n); if(n>=1e6) return (+(n/1e6).toFixed(1))+'M'; if(n>=1e4) return Math.round(n/1e3)+'k'; if(n>=1e3) return (+(n/1e3).toFixed(1))+'k'; return String(n); }
+function rtWeekIdx(c){ if(c.kind!=='weeks'||!c.start) return -1; const d=Math.floor((nowD()-new Date(c.start+'T00:00:00'))/6048e5); return d<0?-1:Math.min(d,c.slots.length-1); }
+function rtSlots(n,mode,base){
+  let m=Array.from({length:n},(_,i)=>i+1);
+  if(mode==='desc') m.reverse(); else if(mode==='fixed') m=m.map(()=>1);
+  else if(mode==='random'){ for(let i=n-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [m[i],m[j]]=[m[j],m[i]]; } }
+  return m.map(x=>x*base);
+}
+function rtN(){ const k=document.getElementById('rtKind').value; return k==='custom'?Math.max(0,Math.min(1000,parseInt(document.getElementById('rtN').value)||0)):+k; }
+function rtKindCh(){ document.getElementById('rtNWrap').style.display=document.getElementById('rtKind').value==='custom'?'':'none'; rtPrev(); }
+function rtPrev(){
+  const n=rtN(), b=parseFloat(document.getElementById('rtBase').value)||0, mode=document.getElementById('rtMode').value, el=document.getElementById('rtPrev');
+  el.textContent=(n>1&&b>0)?'Total del reto: '+money(mode==='fixed'?b*n:b*n*(n+1)/2):'';
+}
+function openRetoModal(){
+  const gs=state.goals.map(g=>`<option value="${g.id}">${escHtml(g.name)}</option>`).join('');
+  openModal('Nuevo reto',`
+    <div class="field"><label>Tipo de reto</label><select id="rtKind" onchange="rtKindCh()"><option value="52">52 semanas</option><option value="100">100 depósitos</option><option value="200">200 depósitos</option><option value="300">300 depósitos</option><option value="custom">Personalizado</option></select></div>
+    <div class="field" id="rtNWrap" style="display:none;"><label>Cantidad de depósitos</label><input type="number" id="rtN" min="2" max="1000" value="30" oninput="rtPrev()"></div>
+    <div class="field"><label>Nombre del reto</label><input type="text" id="rtName" placeholder="Ej: Vacaciones, celular nuevo..."></div>
+    <div class="field"><label>Cómo crecen los montos</label><select id="rtMode" onchange="rtPrev()"><option value="asc">Ascendente (de menos a más)</option><option value="desc">Descendente (de más a menos)</option><option value="fixed">Monto fijo (siempre igual)</option><option value="random">Aleatorio (orden al azar)</option></select></div>
+    <div class="field"><label>Monto base (₲)</label><input type="number" id="rtBase" min="0" placeholder="0" oninput="rtPrev()"></div>
+    <div class="rt-prev" id="rtPrev"></div>
+    ${gs?`<div class="field"><label>Sumar a una meta (opcional)</label><select id="rtGoal"><option value="">No vincular</option>${gs}</select><p class="row-sub" style="margin:6px 0 0;">Cada depósito que marques se suma a esa meta.</p></div>`:''}`,
+    `<button class="btn btn-outline" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="saveReto()">Crear</button>`);
+  rtPrev();
+}
+function saveReto(){
+  const k=document.getElementById('rtKind').value, n=rtN(), base=parseFloat(document.getElementById('rtBase').value)||0, mode=document.getElementById('rtMode').value;
+  if(n<2){ alert('Ingresá la cantidad de depósitos.'); return; }
+  if(base<=0){ alert('Ingresá el monto base.'); return; }
+  const kind=k==='52'?'weeks':'deposits', slots=rtSlots(n,mode,base);
+  const name=document.getElementById('rtName').value.trim()||('Reto '+n+(kind==='weeks'?' semanas':' depósitos'));
+  const ch={id:uid(),name,kind,mode,base,slots,done:slots.map(()=>false),start:todayISO(),goalId:(document.getElementById('rtGoal')||{}).value||'',createdAt:new Date().toISOString()};
+  rtList().push(ch); retoOpen=ch.id; metaTab='retos'; save(); closeModal(); renderAll();
+}
+function rtToggle(id,i){
+  const c=rtList().find(x=>x.id===id); if(!c) return;
+  c.done[i]=!c.done[i];
+  const g=c.goalId&&state.goals.find(x=>x.id===c.goalId);
+  if(g) g.saved=Math.max(0,g.saved+(c.done[i]?1:-1)*c.slots[i]);
+  save(); renderAll();
+}
+function rtNext(id){ const c=rtList().find(x=>x.id===id); if(!c) return; const i=c.done.indexOf(false); if(i>=0) rtToggle(id,i); }
+function rtDelete(id){ if(!confirm('¿Eliminar este reto?')) return; state.challenges=rtList().filter(x=>x.id!==id); retoOpen=null; save(); renderAll(); }
+function rtOpen(id){ retoOpen=id; renderMetas(); window.scrollTo(0,0); }
+function setMetaTab(t){ metaTab=t; retoOpen=null; renderMetas(); }
+function rtCardHtml(c){
+  const tot=rtTotal(c), sv=rtSaved(c), pct=tot>0?Math.round(sv/tot*100):0;
+  return `<div class="ring-row" onclick="rtOpen('${c.id}')">${ringSvg(pct,48,7,'var(--accent)','var(--accent-soft)')}<div style="flex:1;min-width:0;"><b>${escHtml(c.name)}</b><span class="row-sub">${rtCount(c)}/${c.slots.length} · ${money(sv)} · ${pct}%</span></div><span class="muted"><i class=ui-chevR></i></span></div>`;
+}
+function rtDetailHtml(c){
+  const tot=rtTotal(c), sv=rtSaved(c), pct=tot>0?Math.round(sv/tot*100):0, cnt=rtCount(c), n=c.slots.length, wi=rtWeekIdx(c), full=cnt===n;
+  const tiles=c.slots.map((a,i)=>`<button type="button" class="rt-tile${c.done[i]?' on':''}${i===wi?' now':''}" onclick="rtToggle('${c.id}',${i})"><span>${i+1}</span><b>${rtShort(a)}</b></button>`).join('');
+  return `<button class="chat-back" type="button" aria-label="Atrás" onclick="rtOpen(null)" style="margin-bottom:12px;"><i class=ui-chevL></i></button>
+  <div class="goal-feature"><div class="gf-tools"><button class="icon-btn del" onclick="rtDelete('${c.id}')"><i class=ui-trash></i></button></div>
+    <div class="gf-top"><div style="position:relative;width:104px;height:104px;flex-shrink:0;">${ringSvg(pct,104,12,'#fff','rgba(0,0,0,.18)')}<div class="ring-pct" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:26px;">${pct}%</div></div>
+    <div><div class="gf-pills"><span class="gf-pill">${full?'Reto cumplido':'En marcha'}</span><span class="gf-date">${n} ${c.kind==='weeks'?'semanas':'depósitos'}</span></div><h2>${escHtml(c.name)}</h2></div></div>
+    <div class="gf-table"><div><span>Ahorrado</span><b>${money(sv)}</b></div><div><span>Falta</span><b>${money(tot-sv)}</b></div><div><span>Depósitos hechos</span><b>${cnt}/${n}</b></div>${wi>=0&&!c.done[wi]?`<div><span>Esta semana toca</span><b>${money(c.slots[wi])}</b></div>`:''}</div>
+    ${full?'':`<button class="gf-btn" onclick="rtNext('${c.id}')">Marcar siguiente depósito</button>`}</div>
+  <div class="sec-title">Tus depósitos</div><p class="row-sub" style="margin:-4px 2px 12px;">Tocá cada casilla cuando hagas el depósito.</p><div class="rt-grid">${tiles}</div>`;
+}
+const _rtRenderMetas=renderMetas;
+renderMetas=function(){
+  const box=document.getElementById('metasBody'); if(!box) return;
+  const add=document.querySelector('#view-metas .page-head .btn-primary'); if(add) add.setAttribute('onclick',metaTab==='retos'?'openRetoModal()':'openGoalModal()');
+  const tabs=`<div class="rt-tabs"><button type="button" class="${metaTab==='metas'?'on':''}" onclick="setMetaTab('metas')">Metas</button><button type="button" class="${metaTab==='retos'?'on':''}" onclick="setMetaTab('retos')">Retos</button></div>`;
+  if(metaTab!=='retos'){ _rtRenderMetas(); box.insertAdjacentHTML('afterbegin',tabs); return; }
+  const c=retoOpen&&rtList().find(x=>x.id===retoOpen); if(!c) retoOpen=null;
+  const list=rtList();
+  box.innerHTML=c?rtDetailHtml(c):tabs+(list.length?`<div class="card" style="padding:4px 18px;">${list.map(rtCardHtml).join('')}</div>`:`<div class="card empty"><div class="ic"><i class=ui-target></i></div>Creá tu primer reto de ahorro con el botón +.</div>`);
+};
 
 /* ---- Vista Resumen (semana / mes / año) ---- */
 let resTab='mes', resChart=null;
@@ -7989,6 +8084,20 @@ if('serviceWorker' in navigator){
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
 })();
 </script>
+<style>
+.rt-tabs{display:flex;gap:6px;padding:4px;margin:0 0 14px;background:var(--card-bg);border:1px solid var(--card-border);border-radius:999px;}
+.rt-tabs button{flex:1;border:0;background:transparent;color:var(--text-muted);font-weight:700;font-size:14.5px;padding:10px 0;border-radius:999px;}
+.rt-tabs button.on{background:var(--accent);color:var(--on-accent,#0d1f1a);}
+.rt-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:8px;}
+.rt-tile{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:9px 4px;border-radius:16px;border:1px solid var(--card-border);background:var(--card-bg);color:var(--text);font-family:inherit;}
+.rt-tile span{font-size:11px;color:var(--text-muted);font-weight:600;}
+.rt-tile b{font-family:var(--font-n);font-weight:800;font-size:14px;}
+.rt-tile.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent,#0d1f1a);}
+.rt-tile.on span{color:inherit;opacity:.75;}
+.rt-tile.on b{text-decoration:line-through;text-decoration-thickness:2px;}
+.rt-tile.now{outline:2px solid var(--accent);outline-offset:2px;}
+.rt-prev{font-weight:700;margin:2px 0 14px;color:var(--accent-dark);}
+</style>
 <script>
 /* ===== Idiomas: traduce la interfaz según Ajustes > Idioma (es | en | pt | fr) ===== */
 (function(){
@@ -8816,7 +8925,36 @@ Una meta chiquita hoy es una meta cumplida mañana. Creá la primera con el +.|A
 {} va atrasada. Sumá algo esta semana y la rescatamos.|{} is running behind. Add something this week and we'll rescue it.|{} está atrasada. Some algo esta semana e a resgatamos.
 {} sigue en fecha. Te faltan {}.|{} is still on track. You have {} to go.|{} continua em dia. Faltam {}.
 Soy {}. Anotá tu primer movimiento y empiezo a opinar.|I'm {}. Log your first transaction and I'll start weighing in.|Eu sou {}. Registre seu primeiro movimento e eu começo a opinar.
-Todo en orden por acá. Tocame para otro comentario.|All good around here. Tap me for another comment.|Tudo em ordem por aqui. Toque em mim para outro comentário.`;
+Todo en orden por acá. Tocame para otro comentario.|All good around here. Tap me for another comment.|Tudo em ordem por aqui. Toque em mim para outro comentário.
+Retos|Challenges|Desafios
+Nuevo reto|New challenge|Novo desafio
+Tipo de reto|Challenge type|Tipo de desafio
+52 semanas|52 weeks|52 semanas
+100 depósitos|100 deposits|100 depósitos
+200 depósitos|200 deposits|200 depósitos
+300 depósitos|300 deposits|300 depósitos
+Cantidad de depósitos|Number of deposits|Quantidade de depósitos
+Nombre del reto|Challenge name|Nome do desafio
+Cómo crecen los montos|How the amounts change|Como os valores variam
+Ascendente (de menos a más)|Ascending (low to high)|Crescente (do menor ao maior)
+Descendente (de más a menos)|Descending (high to low)|Decrescente (do maior ao menor)
+Monto fijo (siempre igual)|Fixed amount (always the same)|Valor fixo (sempre igual)
+Aleatorio (orden al azar)|Random (shuffled order)|Aleatório (ordem aleatória)
+Monto base (₲)|Base amount (₲)|Valor base (₲)
+Sumar a una meta (opcional)|Add to a goal (optional)|Somar a uma meta (opcional)
+No vincular|Don't link|Não vincular
+Cada depósito que marques se suma a esa meta.|Each deposit you mark is added to that goal.|Cada depósito marcado é somado a essa meta.
+Reto cumplido|Challenge complete|Desafio concluído
+En marcha|In progress|Em andamento
+Depósitos hechos|Deposits made|Depósitos feitos
+Esta semana toca|Due this week|Depositar nesta semana
+Marcar siguiente depósito|Mark next deposit|Marcar próximo depósito
+Tus depósitos|Your deposits|Seus depósitos
+Tocá cada casilla cuando hagas el depósito.|Tap each box when you make the deposit.|Toque em cada casa quando fizer o depósito.
+Creá tu primer reto de ahorro con el botón +.|Create your first savings challenge with the + button.|Crie seu primeiro desafio de economia com o botão +.
+Descontar de la cuenta|Deduct from account|Descontar da conta
+No descontar de ninguna cuenta|Don't deduct from any account|Não descontar de nenhuma conta
+Aporte a meta {}|Goal contribution {}|Aporte à meta {}`;
 X.split('\n').forEach(l=>{ const a=l.split('|'); if(a.length<3) return;
   if(a[0].indexOf('{}')<0){ D[a[0]]=Object.assign(D[a[0]]||{},{en:a[1],pt:a[2]}); return; }
   const rep=s=>s.split('{}').map((x,i,r)=>x+(i<r.length-1?'$'+(i+1):'')).join('');
@@ -8828,6 +8966,9 @@ RULES.push([/^(\d+(?:[.,]\d+)?) año$/,{en:'$1 year',pt:'$1 ano'}]);
 RULES.push([/^(\d+(?:[.,]\d+)?) años$/,{en:'$1 years',pt:'$1 anos'}]);
 RULES.push([/^(\d+(?:[.,]\d+)?) meses$/,{en:'$1 months',pt:'$1 meses'}]);
 RULES.push([/^(\d+) días$/,{en:'$1 days',pt:'$1 dias'}]);
+RULES.push([/^(\d+) depósitos$/,{en:'$1 deposits',pt:'$1 depósitos'}]);
+RULES.push([/^(\d+) semanas$/,{en:'$1 weeks',pt:'$1 semanas'}]);
+RULES.push([/^Total del reto: (.+)$/,{en:'Challenge total: $1',pt:'Total do desafio: $1'}]);
 RULES.push([/^(\d+) movimientos$/,{en:'$1 transactions',pt:'$1 movimentos'}]);
 RULES.push([/^1 movimiento$/,{en:'1 transaction',pt:'1 movimento'}]);
 RULES.push([/^ayer( · [\s\S]+)$/,{en:'yesterday$1',pt:'ontem$1'}]);
@@ -8907,7 +9048,7 @@ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded'
 setTimeout(run,400);
 })();
 </script>
-<script id="anim-js">
+<script data-late="1" type="text/plain" id="anim-js">
 (function(){
   var reduce=window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches;
   function stag(root,sel,max){ if(!root) return; root.querySelectorAll(sel).forEach(function(el,i){ el.style.setProperty('--i',Math.min(i,max)); }); }
@@ -8939,7 +9080,7 @@ setTimeout(run,400);
   };
 })();
 </script>
-<script id="anim-js2">
+<script data-late="1" type="text/plain" id="anim-js2">
 (function(){
   var reduce=window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches;
   if(reduce) return;
@@ -8965,7 +9106,7 @@ setTimeout(run,400);
   },{passive:true});
 })();
 </script>
-<script id="anim-js3">
+<script data-late="1" type="text/plain" id="anim-js3">
 (function(){
   var reduce=window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches;
   if(reduce) return;
@@ -8998,7 +9139,7 @@ setTimeout(run,400);
   };
 })();
 </script>
-<script id="anim-js4">
+<script data-late="1" type="text/plain" id="anim-js4">
 (function(){
   var reduce=window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches;
   if(reduce) return;
@@ -9030,7 +9171,7 @@ setTimeout(run,400);
   },{passive:true});
 })();
 </script>
-<script id="anim-js5">
+<script data-late="1" type="text/plain" id="anim-js5">
 (function(){
   var reduce=window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches;
   if(reduce) return;
@@ -9077,7 +9218,7 @@ setTimeout(run,400);
   onScroll();
 })();
 </script>
-<script id="anim-js6">
+<script data-late="1" type="text/plain" id="anim-js6">
 (function(){
   var reduce=window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches;
   if(reduce) return;
@@ -9095,7 +9236,7 @@ setTimeout(run,400);
   window.addEventListener('scroll',release,{passive:true});
 })();
 </script>
-<script id="anim-js7">
+<script data-late="1" type="text/plain" id="anim-js7">
 (function(){
   var reduce=window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches;
   if(reduce) return;
@@ -9152,7 +9293,7 @@ setTimeout(run,400);
   document.addEventListener('touchend',endEdge,{passive:true}); document.addEventListener('touchcancel',endEdge,{passive:true});
 })();
 </script>
-<script id="anim-final-js">
+<script data-late="1" type="text/plain" id="anim-final-js">
 (function(){
   if(window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches) return;
   var ids=['heroBalance','savingsOnlyAmount','statIngresos','statGastos','statDeuda','statAhorro'], last={}, ready=false;
@@ -9168,6 +9309,266 @@ setTimeout(run,400);
       },1200);
     }).observe(e,{childList:true,characterData:true,subtree:true});
   });
+})();
+</script>
+<style id="wive-motion-css">
+@media (prefers-reduced-motion:no-preference){
+@keyframes moRise{from{opacity:0;transform:translateY(16px) scale(.97)}to{opacity:1;transform:none}}
+@keyframes moDrop{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+@keyframes moGrow{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@keyframes moPop{from{opacity:0;transform:translateY(14px) scale(.94)}60%{transform:translateY(-2px) scale(1.01)}to{opacity:1;transform:none}}
+@keyframes moRip{to{transform:scale(3);opacity:0}}
+.view.v-enter .page-head{animation:moDrop .45s var(--ease-out) both}
+.view.v-enter :is(.tx-item,tbody tr,.market-item,.pos-card,.pos-row,.k-card,.k-row,.wcard,.today-row,.rt-tile,.legend-item,.toggle-row,.kv-row,.rt-tabs,.sec-title){animation:moRise .5s var(--ease-out) both;animation-delay:560ms}
+.view.v-enter :is(.tx-item,tbody tr,.market-item,.pos-card,.pos-row,.k-card,.k-row,.wcard,.today-row,.rt-tile,.legend-item,.toggle-row,.kv-row,.rt-tabs,.sec-title):nth-child(1){animation-delay:128ms}
+.view.v-enter :is(.tx-item,tbody tr,.market-item,.pos-card,.pos-row,.k-card,.k-row,.wcard,.today-row,.rt-tile,.legend-item,.toggle-row,.kv-row,.rt-tabs,.sec-title):nth-child(2){animation-delay:166ms}
+.view.v-enter :is(.tx-item,tbody tr,.market-item,.pos-card,.pos-row,.k-card,.k-row,.wcard,.today-row,.rt-tile,.legend-item,.toggle-row,.kv-row,.rt-tabs,.sec-title):nth-child(3){animation-delay:204ms}
+.view.v-enter :is(.tx-item,tbody tr,.market-item,.pos-card,.pos-row,.k-card,.k-row,.wcard,.today-row,.rt-tile,.legend-item,.toggle-row,.kv-row,.rt-tabs,.sec-title):nth-child(4){animation-delay:242ms}
+.view.v-enter :is(.tx-item,tbody tr,.market-item,.pos-card,.pos-row,.k-card,.k-row,.wcard,.today-row,.rt-tile,.legend-item,.toggle-row,.kv-row,.rt-tabs,.sec-title):nth-child(5){animation-delay:280ms}
+.view.v-enter :is(.tx-item,tbody tr,.market-item,.pos-card,.pos-row,.k-card,.k-row,.wcard,.today-row,.rt-tile,.legend-item,.toggle-row,.kv-row,.rt-tabs,.sec-title):nth-child(6){animation-delay:318ms}
+.view.v-enter :is(.tx-item,tbody tr,.market-item,.pos-card,.pos-row,.k-card,.k-row,.wcard,.today-row,.rt-tile,.legend-item,.toggle-row,.kv-row,.rt-tabs,.sec-title):nth-child(7){animation-delay:356ms}
+.view.v-enter :is(.tx-item,tbody tr,.market-item,.pos-card,.pos-row,.k-card,.k-row,.wcard,.today-row,.rt-tile,.legend-item,.toggle-row,.kv-row,.rt-tabs,.sec-title):nth-child(8){animation-delay:394ms}
+.view.v-enter :is(.tx-item,tbody tr,.market-item,.pos-card,.pos-row,.k-card,.k-row,.wcard,.today-row,.rt-tile,.legend-item,.toggle-row,.kv-row,.rt-tabs,.sec-title):nth-child(9){animation-delay:432ms}
+.view.v-enter :is(.tx-item,tbody tr,.market-item,.pos-card,.pos-row,.k-card,.k-row,.wcard,.today-row,.rt-tile,.legend-item,.toggle-row,.kv-row,.rt-tabs,.sec-title):nth-child(10){animation-delay:470ms}
+.view.v-enter :is(.tx-item,tbody tr,.market-item,.pos-card,.pos-row,.k-card,.k-row,.wcard,.today-row,.rt-tile,.legend-item,.toggle-row,.kv-row,.rt-tabs,.sec-title):nth-child(11){animation-delay:508ms}
+.view.v-enter :is(.tx-item,tbody tr,.market-item,.pos-card,.pos-row,.k-card,.k-row,.wcard,.today-row,.rt-tile,.legend-item,.toggle-row,.kv-row,.rt-tabs,.sec-title):nth-child(12){animation-delay:546ms}
+.view.v-enter :is(.spent-bar i,.progress i,[class$="bar"]>i){transform-origin:left;animation:moGrow .9s var(--ease-out) .2s both}
+.overlay.active .modal .modal-head{animation:moDrop .4s var(--ease-out) both}
+.overlay.active .modal :is(.field,.field-row,.modal-foot,.rt-prev,.dl-pick,.debt-colors){animation:moRise .44s var(--ease-out) both;animation-delay:calc(var(--mf,0)*42ms + 100ms)}
+.overlay.active .modal>:nth-child(1){--mf:0}
+.overlay.active .modal>:nth-child(2){--mf:1}
+.overlay.active .modal>:nth-child(3){--mf:2}
+.overlay.active .modal>:nth-child(4){--mf:3}
+.overlay.active .modal>:nth-child(5){--mf:4}
+.overlay.active .modal>:nth-child(6){--mf:5}
+.overlay.active .modal>:nth-child(7){--mf:6}
+.overlay.active .modal>:nth-child(8){--mf:7}
+.overlay.active .modal>:nth-child(9){--mf:8}
+.overlay.active .modal>:nth-child(10){--mf:9}
+.overlay.active .modal>:nth-child(11){--mf:10}
+.mo-pop{animation:moPop .45s var(--ease-out) both}
+:is(.btn,.icon-btn,.gf-btn,.mp-chip,.bn-item,.nav-item,.market-item,.pos-card,.k-card,.wcard,.tx-item,.rt-tile){transition:transform .18s var(--ease-out),background-color .2s,color .2s,box-shadow .2s,border-color .2s,opacity .2s}
+:is(.btn,.icon-btn,.gf-btn,.mp-chip,.bn-item,.nav-item,.market-item,.pos-card,.k-card,.wcard,.tx-item,.rt-tile):active{transform:scale(.95)}
+.modal-close{transition:transform .25s var(--ease-out)}.modal-close:hover{transform:rotate(90deg)}
+@media(hover:hover){:is(.tx-item,.market-item,.pos-card,.k-card,.wcard):hover{transform:translateY(-2px)}.btn:hover,.gf-btn:hover{transform:translateY(-1px)}}
+.mo-rip{position:absolute;border-radius:50%;pointer-events:none;background:currentColor;opacity:.22;transform:scale(0);animation:moRip .6s ease-out forwards}
+}
+</style>
+<script id="wive-motion">
+(function(){
+if(window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches) return;
+var POP=/(^|[\s_-])(sheet|popup|popover|dropdown|menu|toast|picker|panel)([\s_-]|$)/i, CNT='.spent-amt,.ring-pct,.gf-table b,.stat-card b,.home-balance-row b';
+function ring(root){ root.querySelectorAll('svg circle[stroke-dasharray]').forEach(function(c){
+  var f=c.getAttribute('stroke-dasharray'), p=(f||'').split(' '); if(c._mr||p.length<2||!(parseFloat(p[0])>0)) return; c._mr=1;
+  c.style.transition='none'; c.style.strokeDasharray='0 '+p[1]; void c.getBoundingClientRect();
+  c.style.transition='stroke-dasharray 1s cubic-bezier(.2,.8,.2,1) .15s'; c.style.strokeDasharray=f;
+  setTimeout(function(){ c.style.transition=''; c.style.strokeDasharray=''; c._mr=0; },1300); }); }
+function count(el){
+  if(el._mc||el.children.length) return; var t=el.textContent, m=t.match(/\d[\d.,]*/); if(!m) return;
+  var raw=m[0], sep=(raw.match(/[.,]/)||[''])[0], d=raw.replace(/[.,]/g,'');
+  if(!/^\d{2,12}$/.test(d)) return; if(sep&&raw.split(sep).slice(1).some(function(g){return g.length!==3;})) return;
+  var n=+d, pre=t.slice(0,m.index), post=t.slice(m.index+raw.length), t0=performance.now(); el._mc=1;
+  (function f(now){ var k=Math.min(1,(now-t0)/900), v=String(Math.round(n*(1-Math.pow(1-k,3))));
+    if(sep) v=v.replace(/\B(?=(\d{3})+(?!\d))/g,sep); el.textContent=pre+v+post;
+    if(k<1) requestAnimationFrame(f); else el._mc=0; })(t0); }
+function play(root){ ring(root); root.querySelectorAll(CNT).forEach(count); }
+new MutationObserver(function(ms){ ms.forEach(function(m){
+  if(m.type==='attributes'){ var t=m.target, c=t.classList; if(!c||!(c.contains('view')||c.contains('overlay'))) return;
+    if(c.contains('active')){ if(!t._mo){ t._mo=1; requestAnimationFrame(function(){ play(t); }); } } else t._mo=0; }
+  else m.addedNodes.forEach(function(n){ var cn=n.nodeType===1&&n.className;
+    if(typeof cn==='string'&&POP.test(cn)&&!/mascot|mp-|mo-pop/.test(cn)){ n.classList.add('mo-pop'); setTimeout(function(){ n.classList.remove('mo-pop'); },700); } }); });
+}).observe(document.body,{attributes:true,attributeFilter:['class'],childList:true,subtree:true});
+document.addEventListener('pointerdown',function(e){
+  var b=e.target.closest&&e.target.closest('.btn,.gf-btn,.rt-tile,.mp-chip,.market-item'); if(!b||b.disabled) return;
+  var r=b.getBoundingClientRect(), z=Math.max(r.width,r.height)*1.2, x=document.createElement('span'); x.className='mo-rip';
+  x.style.cssText='width:'+z+'px;height:'+z+'px;left:'+(e.clientX-r.left-z/2)+'px;top:'+(e.clientY-r.top-z/2)+'px';
+  if(getComputedStyle(b).position==='static') b.style.position='relative'; b.style.overflow='hidden'; b.appendChild(x);
+  setTimeout(function(){ x.remove(); },650); },{passive:true});
+})();
+</script>
+<style id="pro-motion-css">
+@media (prefers-reduced-motion:no-preference){
+:root{--pro-ease:cubic-bezier(.22,1,.36,1);--pro-spring:cubic-bezier(.34,1.4,.5,1);}
+@keyframes proUp{from{opacity:0;transform:translateY(26px) scale(.96)}to{opacity:1;transform:none}}
+@keyframes proSlide{from{opacity:0;transform:translateX(-22px)}to{opacity:1;transform:none}}
+@keyframes proPop{0%{opacity:0;transform:scale(.85) translateY(14px)}60%{opacity:1;transform:scale(1.025)}100%{transform:none}}
+@keyframes proDrop{from{opacity:0;transform:translateY(-8px);}to{opacity:1;transform:none}}
+@keyframes proWiggle{0%,100%{transform:none}30%{transform:rotate(-8deg) scale(1.12)}65%{transform:rotate(5deg) scale(1.06)}}
+@keyframes proSheen{from{transform:translateX(-120%)}to{transform:translateX(120%)}}
+@keyframes proGlow{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 45%,transparent)}100%{box-shadow:0 0 0 14px transparent}}
+@keyframes proFill{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+
+/* tarjetas, cuentas, bolsillos, inversiones, bolsa, cripto, deudas, presupuestos, metas: entran en cascada */
+.view.v-enter :is(.grid,.wallet-stack,#brokerPositions,#ksBody)>*:not(.tx-list){animation:proUp .55s var(--pro-ease) backwards;animation-delay:calc(var(--st,0)*50ms + 90ms)}
+/* transacciones, ingresos, gastos, transferencias: filas y días */
+.view.v-enter .tx-day{animation:proSlide .5s var(--pro-ease) backwards;animation-delay:calc(var(--st,0)*50ms + 100ms)}
+.view.v-enter .tx-item{animation:proSlide .5s var(--pro-ease) backwards;animation-delay:calc(var(--r,var(--st,0))*40ms + 160ms)}
+.tx-det{animation:proDrop .32s var(--pro-ease) backwards}
+.tx-chev{transition:transform .3s var(--pro-ease)}
+/* elementos nuevos o actualizados (agregar un gasto, meta, tarjeta, deuda...) */
+.pro-new{animation:proPop .65s var(--pro-spring) backwards!important}
+/* encabezados y botones de acción */
+.view.v-enter .page-head .btn{animation:proPop .6s var(--pro-spring) .25s backwards}
+.view.v-enter .note-info,.view.v-enter .filters{animation:proDrop .45s var(--pro-ease) .12s backwards}
+/* barras y anillos */
+.view.v-enter .budget-fill{transform-origin:left;animation:proFill 1s var(--pro-ease) .3s backwards}
+/* interacción: elevación, brillo e íconos que reaccionan */
+:is(.grid,.wallet-stack)>*{transition:transform .35s var(--pro-ease),box-shadow .35s ease,border-color .25s ease}
+@media(hover:hover){
+  :is(.grid,.wallet-stack)>:hover{transform:translateY(-5px);box-shadow:0 18px 36px -18px rgba(15,35,30,.38)}
+  :is(.grid>*,.k-card):hover :is(.pos-logo,.k-head svg,.k-head i,.acc-head svg,.acc-head i){animation:proWiggle .6s var(--pro-ease)}
+  .tx-item:hover{transform:translateX(4px)}
+}
+.tx-item.open .tx-chev,.tx-item[open] .tx-chev{transform:rotate(180deg)}
+/* botones principales: pulso al enfocar y al presionar */
+.btn-primary:focus-visible{animation:proGlow .9s ease-out}
+.btn-primary:active{transform:scale(.95)}
+/* pestañas, chips y opciones seleccionadas */
+:is(.modal,.view) :is(button,.chip,.mp-chip,.rt-tile).active,:is(.modal,.view) :is(button,.chip,.mp-chip).sel{animation:proPop .45s var(--pro-spring)}
+/* menús y listas desplegables */
+:is(.isel-list,.dropdown,.popover,.menu-pop,.toast,#toast){animation:proDrop .28s var(--pro-ease) backwards}
+/* navegación inferior y lateral */
+.bn-item.active svg{animation:proWiggle .55s var(--pro-ease)}
+/* números que cambian */
+.pro-tick{display:inline-block;animation:proPop .5s var(--pro-ease)}
+/* ajustes: filas y switches */
+#ksBody .ks-r{transition:background .2s,transform .25s var(--pro-ease)}
+#ksBody .ks-r:active{transform:scale(.98)}
+.switch{transition:background .3s ease}
+.switch::after{transition:transform .35s var(--pro-spring),width .2s,left .35s var(--pro-spring)!important}
+}
+</style>
+<script id="pro-motion">
+(function(){
+if(window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches) return;
+var SEL='.grid,.wallet-stack,.tx-list,#brokerPositions,#ksBody,#allTxTable,#recentTxTable';
+var AMT='.k-amt,.tx-amt,.acc-bal,.pos-val,.budget-amt';
+function idx(root){
+  root.querySelectorAll(SEL).forEach(function(c){
+    var n=0; Array.prototype.forEach.call(c.children,function(k){ k.style.setProperty('--st',Math.min(n++,8)); });
+  });
+  root.querySelectorAll('.tx-day').forEach(function(d,i){ d.style.setProperty('--st',Math.min(i,10)); });
+}
+function count(el){
+  if(el._pc||el.children.length) return;
+  var t=el.textContent, m=t.match(/\d[\d.,]*/); if(!m) return;
+  var raw=m[0], sep=(raw.match(/[.,]/)||[''])[0], d=raw.replace(/[.,]/g,'');
+  if(!/^\d{3,12}$/.test(d)) return;
+  if(sep&&raw.split(sep).slice(1).some(function(g){return g.length!==3;})) return;
+  var n=+d, pre=t.slice(0,m.index), post=t.slice(m.index+raw.length), t0=performance.now(); el._pc=1;
+  (function f(now){
+    var k=Math.min(1,(now-t0)/850), v=String(Math.round(n*(1-Math.pow(1-k,3))));
+    if(sep) v=v.replace(/\B(?=(\d{3})+(?!\d))/g,sep);
+    el.textContent=pre+v+post;
+    if(k<1) requestAnimationFrame(f); else el._pc=0;
+  })(t0);
+}
+function onView(v){ requestAnimationFrame(function(){ idx(v); v.querySelectorAll(AMT).forEach(count); }); }
+var busy=false;
+new MutationObserver(function(ms){
+  if(busy) return;
+  ms.forEach(function(m){
+    if(m.type==='attributes'){
+      var t=m.target; if(t.classList&&t.classList.contains('view')&&t.classList.contains('v-enter')) onView(t);
+      return;
+    }
+    var tg=m.target; if(!tg.matches||!tg.matches(SEL)||!m.addedNodes.length) return;
+    var v=tg.closest('.view'); if(v&&!v.classList.contains('active')) return; if(v&&v.classList.contains('v-enter')) { onView(v); return; }
+    var kids=Array.prototype.slice.call(m.addedNodes).filter(function(n){return n.nodeType===1;});
+    if(!kids.length||kids.length>40&&!tg.matches('.grid,.wallet-stack')) return;
+    busy=true;
+    kids.forEach(function(n,i){
+      n.style.setProperty('--st',Math.min(i,12));
+      n.style.animationDelay=Math.min(i,12)*50+'ms';
+      n.classList.add('pro-new');
+      n.querySelectorAll(AMT).forEach(count);
+      setTimeout(function(){ n.classList.remove('pro-new'); n.style.animationDelay=''; },900+Math.min(i,12)*50);
+    });
+    setTimeout(function(){ busy=false; },0);
+  });
+}).observe(document.body,{attributes:true,attributeFilter:['class'],childList:true,subtree:true});
+/* resalta cualquier monto que cambie de valor (saldos, totales, progreso) */
+var last=new WeakMap();
+setInterval(function(){
+  var act=document.querySelector('.view.active'); if(!act) return;
+  act.querySelectorAll('.stat-card b,.home-balance-row b,.spent-amt,.k-amt').forEach(function(e){
+    var v=e.textContent, p=last.get(e);
+    if(p!==undefined&&p!==v&&!e._pc&&!e._mc){ e.classList.remove('pro-tick'); void e.offsetWidth; e.classList.add('pro-tick'); }
+    last.set(e,v);
+  });
+},900);
+})();
+</script>
+<style id="open-motion-css">
+@media (prefers-reduced-motion:no-preference){
+@keyframes oGrow{0%{opacity:0;transform:scale(.55) translateY(24px)}55%{opacity:1}78%{transform:scale(1.025)}100%{opacity:1;transform:none}}
+@keyframes oSheet{0%{opacity:.4;transform:translateY(100%)}70%{opacity:1;transform:translateY(-1.5%)}100%{transform:none}}
+@keyframes oShrink{to{opacity:0;transform:scale(.75) translateY(18px)}}
+@keyframes oSheetOut{to{opacity:.5;transform:translateY(100%)}}
+@keyframes oHead{from{opacity:0;transform:translateY(-14px) scale(.96)}to{opacity:1;transform:none}}
+@keyframes oFieldL{from{opacity:0;transform:translateX(-26px)}to{opacity:1;transform:none}}
+@keyframes oFieldR{from{opacity:0;transform:translateX(26px)}to{opacity:1;transform:none}}
+@keyframes oFoot{from{opacity:0;transform:translateY(22px) scale(.94)}to{opacity:1;transform:none}}
+@keyframes oClose{from{opacity:0;transform:rotate(-120deg) scale(.3)}to{opacity:1;transform:none}}
+@keyframes oLaunch{0%{transform:scale(1)}40%{transform:scale(.95)}100%{transform:scale(1)}}
+@keyframes oFlip{from{opacity:0;transform:perspective(900px) rotateX(-65deg) translateY(-24px)}to{opacity:1;transform:none}}
+@keyframes oGlow{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 50%,transparent)}100%{box-shadow:0 0 0 22px transparent}}
+@keyframes oLogo{0%{transform:scale(0) rotate(-90deg)}70%{transform:scale(1.2) rotate(8deg)}100%{transform:none}}
+/* cuadro que se abre: crece desde donde tocaste */
+#overlay.overlay.active .modal{animation:oGrow .55s var(--pro-spring) backwards;will-change:transform,opacity}
+#overlay.overlay.swap .modal{animation:oFieldR .35s var(--pro-ease) backwards}
+#overlay.overlay.closing .modal{animation:oShrink .24s ease-in forwards}
+#overlay.overlay.active .modal .modal-head{animation:oHead .5s var(--pro-ease) .12s backwards}
+#overlay.overlay.active .modal .modal-close{animation:oClose .6s var(--pro-spring) .2s backwards}
+#overlay.overlay.active .modal .field:nth-of-type(odd){animation:oFieldL .5s var(--pro-ease) calc(var(--mf,0)*55ms + 170ms) backwards}
+#overlay.overlay.active .modal .field:nth-of-type(even){animation:oFieldR .5s var(--pro-ease) calc(var(--mf,0)*55ms + 170ms) backwards}
+#overlay.overlay.active .modal :is(.modal-foot,.modal-foot .btn){animation:oFoot .55s var(--pro-spring) .38s backwards}
+#overlay.overlay.active .modal :is(.ks-opt,.ks-r,.dl-pick>*,.debt-colors>*,.rt-tile){animation:oFieldL .45s var(--pro-ease) calc(var(--i,0)*40ms + 160ms) backwards}
+.modal .field label{transition:color .2s,transform .25s var(--pro-ease)}
+.modal .field:focus-within label{color:var(--accent);transform:translateX(4px)}
+.modal :is(input,select,textarea):focus{transform:translateY(-1px)}
+.modal :is(input,select,textarea){transition:transform .25s var(--pro-ease),border-color .2s,box-shadow .25s}
+.modal :is(.pos-logo,.k-head svg,.acc-head svg){animation:oLogo .6s var(--pro-spring) .25s backwards}
+@media(max-width:700px){
+  #overlay.overlay.active .modal{animation:oSheet .55s var(--pro-ease) backwards}
+  #overlay.overlay.closing .modal{animation:oSheetOut .26s ease-in forwards}
+}
+/* toque en una tarjeta, cuenta o fila: respuesta inmediata */
+.launching{animation:oLaunch .38s var(--pro-ease)!important}
+/* tarjetas: se despliegan como cartas */
+.view.v-enter .wallet-stack#cardsGrid>*{animation:oFlip .75s var(--pro-ease) backwards;animation-delay:calc(var(--st,0)*90ms + 140ms)}
+.view.v-enter :is(.grid>*,.wallet-stack>*) :is(.pos-logo,.pos-sym,.acc-head svg,.acc-head i){animation:oLogo .6s var(--pro-spring) backwards;animation-delay:calc(var(--st,0)*60ms + 380ms)}
+/* menú lateral y desplegables */
+.sidebar.open{animation:oFieldL .4s var(--pro-ease)}
+.overlay-nav.active{transition:opacity .3s}
+.isel.open .isel-list>:nth-child(1){animation:oFieldL .32s var(--pro-ease) 35ms backwards}
+.isel.open .isel-list>:nth-child(2){animation:oFieldL .32s var(--pro-ease) 70ms backwards}
+.isel.open .isel-list>:nth-child(3){animation:oFieldL .32s var(--pro-ease) 105ms backwards}
+.isel.open .isel-list>:nth-child(4){animation:oFieldL .32s var(--pro-ease) 140ms backwards}
+.isel.open .isel-list>:nth-child(5){animation:oFieldL .32s var(--pro-ease) 175ms backwards}
+.isel.open .isel-list>:nth-child(6){animation:oFieldL .32s var(--pro-ease) 210ms backwards}
+.isel.open .isel-list>:nth-child(7){animation:oFieldL .32s var(--pro-ease) 245ms backwards}
+.isel.open .isel-list>:nth-child(8){animation:oFieldL .32s var(--pro-ease) 280ms backwards}
+}
+</style>
+<script id="open-motion">
+(function(){
+if(window.matchMedia&&matchMedia('(prefers-reduced-motion:reduce)').matches) return;
+var lx=innerWidth/2, ly=innerHeight/2;
+var T='.grid>*,.wallet-stack>*,.tx-item,.stat-card,.card[onclick],.k-card,.wcard,.pos-card,.market-item,.goal-mini';
+document.addEventListener('pointerdown',function(e){
+  lx=e.clientX; ly=e.clientY;
+  var c=e.target.closest&&e.target.closest(T); if(!c||c.closest('.modal')) return;
+  c.classList.remove('launching'); void c.offsetWidth; c.classList.add('launching');
+  setTimeout(function(){ c.classList.remove('launching'); },420);
+},{passive:true,capture:true});
+var ov=document.getElementById('overlay'); if(!ov) return;
+new MutationObserver(function(){
+  var c=ov.classList; if(!c.contains('active')||c.contains('swap')||c.contains('closing')) return;
+  var m=ov.querySelector('.modal'); if(!m||innerWidth<=700) return;
+  var x=Math.max(-150,Math.min(m.offsetWidth+150,lx-m.offsetLeft)), y=Math.max(-150,Math.min(m.offsetHeight+150,ly-m.offsetTop));
+  m.style.transformOrigin=x+'px '+y+'px';
+}).observe(ov,{attributes:true,attributeFilter:['class']});
 })();
 </script>
 </body>
