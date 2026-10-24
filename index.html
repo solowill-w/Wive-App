@@ -2333,7 +2333,8 @@ function iconSvg(id){ if(PNG_ICON_IDS.has(id)) return `<svg viewBox="0 0 24 24">
 
 const CATEGORY_PALETTE = ['#e0a86a','#6f8fd6','#4f9d7d','#c084c9','#e0615a','#79897f','#5fb891','#e97b76'];
 function defaultCategories(){
-  return BUDGET_ICON_IDS.map((icon,i)=>({id:uid(), name:ICON_LABELS[icon]||icon, icon, color:CATEGORY_PALETTE[i%CATEGORY_PALETTE.length]}));
+  const _seen=new Set();
+  return BUDGET_ICON_IDS.filter(icon=>{ const k=(ICON_LABELS[icon]||icon).toLowerCase(); if(_seen.has(k)) return false; _seen.add(k); return true; }).map((icon,i)=>({id:uid(), name:ICON_LABELS[icon]||icon, icon, color:CATEGORY_PALETTE[i%CATEGORY_PALETTE.length]}));
 }
 const STORE_KEY = 'misFinanzasData_v1';
 
@@ -2359,6 +2360,7 @@ function loadState(){
 }
 let state = loadState();
 function migrateState(){
+  if(Array.isArray(state.categories)){ const seen=new Set(); state.categories=state.categories.filter(c=>{ const k=String(c.name||'').trim().toLowerCase(); if(seen.has(k)) return false; seen.add(k); return true; }); }
   if(!Array.isArray(state.goals)) state.goals = [];
   if(!Array.isArray(state.challenges)) state.challenges = [];
   if(!Array.isArray(state.budgets)) state.budgets = [];
@@ -3845,9 +3847,11 @@ function handleCategoryChange(sel){
         state.categories.push({id:uid(), name:trimmed, icon:'other', color:CATEGORY_PALETTE[state.categories.length % CATEGORY_PALETTE.length]});
       }
       save();
-      sel.innerHTML = categoryOptions(trimmed);
+      const _t=document.getElementById('txType')&&document.getElementById('txType').value==='transferencia';
+      sel.innerHTML = (_t?'<option value="">Sin categoría</option>':'')+categoryOptions(trimmed);
     } else {
-      sel.value = state.categories[0] ? state.categories[0].name : '';
+      const _t=document.getElementById('txType')&&document.getElementById('txType').value==='transferencia';
+      sel.value = _t ? '' : (state.categories[0] ? state.categories[0].name : '');
     }
   }
 }
@@ -3905,7 +3909,7 @@ function openTxModal(prefType, editId){
     </div>
     <input type="hidden" id="txType" value="${type}">
     <div class="field"><label id="txAmountLabel">Monto (₲)</label><input type="number" id="txAmount" min="0" step="1" value="${editing?editing.amount:''}" placeholder="0" oninput="updateTransferPreview()"></div>
-    <div class="field" id="txCatField" style="display:${(isTransfer||type==='ingreso')?'none':''};"><label>Categoría</label><select id="txCat" onchange="handleCategoryChange(this)">${categoryOptions(editing&&editing.category?editing.category:(state.categories[0]?state.categories[0].name:''))}</select></div>
+    <div class="field" id="txCatField" style="display:${type==='ingreso'?'none':''};"><label id="txCatLabel">${isTransfer?'Categoría (opcional)':'Categoría'}</label><select id="txCat" onchange="handleCategoryChange(this)">${isTransfer?'<option value="">Sin categoría</option>':''}${categoryOptions(editing&&editing.category?editing.category:(isTransfer?'':(state.categories[0]?state.categories[0].name:'')))}</select></div>
     <div class="field"><label>Descripción</label><input type="text" id="txDesc" value="${editing?editing.description:''}" placeholder="${isTransfer?'Ej: Aporte a inversión':'Ej: Almuerzo, salario, etc.'}"></div>
     <div id="txCatAccWrap" style="display:${isTransfer?'none':''};">
       <div class="field"><label>Cuenta</label><select id="txAcc">${accOptions || '<option value="">No hay cuentas, crea una primero</option>'}</select></div>
@@ -3936,7 +3940,10 @@ function setTxType(t){
   document.getElementById('optGasto').className = 'toggle-opt' + (t==='gasto'?' sel-gasto':'');
   document.getElementById('optTransfer').className = 'toggle-opt' + (t==='transferencia'?' sel-transferencia':'');
   const isTransfer = t==='transferencia';
-  document.getElementById('txCatField').style.display = (isTransfer||t==='ingreso')?'none':'';
+  document.getElementById('txCatField').style.display = (t==='ingreso')?'none':'';
+  { const cl=document.getElementById('txCatLabel'); if(cl) cl.textContent=isTransfer?'Categoría (opcional)':'Categoría';
+    const cs=document.getElementById('txCat'); if(cs){ let v=cs.value; if(isTransfer) v=''; else if(!v||v==='__new__') v=(state.categories[0]||{}).name||'';
+      cs.innerHTML=(isTransfer?'<option value="">Sin categoría</option>':'')+categoryOptions(v); cs.value=v; } }
   document.getElementById('txCatAccWrap').style.display = isTransfer?'none':'';
   document.getElementById('txTransferWrap').style.display = isTransfer?'':'none';
   updateTransferCurrencyUI();
@@ -4020,16 +4027,19 @@ function saveTx(editId){
     const currency = curEl ? curEl.value : 'PYG';
     const {originAmount, destAmount} = computeTransferAmounts(originKind, originId, destKind, destId, amount, currency);
     const desc = description || 'Transferencia';
+    const _tc=(document.getElementById('txCat')||{}).value||''; const tcat=(_tc==='__new__')?'':_tc;
     if(editId){
       const tx = state.transactions.find(t=>t.id===editId);
       if(tx.type==='transferencia') applyTransferEffect(tx, true); else applyTxEffect(tx, true);
       tx.type='transferencia'; tx.amount=amount; tx.currency=currency; tx.date=date; tx.description=desc;
       tx.originKind=originKind; tx.originId=originId; tx.destKind=destKind; tx.destId=destId;
       tx.originAmount=originAmount; tx.destAmount=destAmount;
-      delete tx.category; delete tx.accountKind; delete tx.accountId;
+      if(tcat) tx.category=tcat; else delete tx.category;
+      delete tx.accountKind; delete tx.accountId;
       applyTransferEffect(tx, false);
     } else {
       const tx = {id:uid(), type:'transferencia', amount, currency, date, description:desc, originKind, originId, destKind, destId, originAmount, destAmount};
+      if(tcat) tx.category=tcat;
       state.transactions.push(tx);
       applyTransferEffect(tx, false);
     }
@@ -4621,11 +4631,12 @@ function txRowHtml(tx){
     return `<div class="tx-item">
       <div class="tx-head" onclick="toggleTx(this)">
         <span class="cat-badge" style="width:30px;height:30px;background:#4a6fd622;color:#4a6fd6;">${iconSvg('coins')}</span>
-        <div class="tx-main"><div class="row-desc">${tx.description}</div><div class="row-sub">${originName} → ${destName}</div></div>
+        <div class="tx-main"><div class="row-desc">${tx.description}</div><div class="row-sub">${originName} → ${destName}${tx.category?' · '+escHtml(tx.category):''}</div></div>
         <div class="tx-amt">${amountStr}</div>${chev}
       </div>
       <div class="tx-det">
         ${kv('Tipo','<span class="pill transferencia">Transferencia</span>')}
+        ${tx.category?kv('Categoría',escHtml(tx.category)):''}
         ${kv('Fecha',dateStr)}
         ${kv('Origen',originName)}
         ${kv('Destino',destName)}
@@ -6324,6 +6335,21 @@ renderMetas=function(){
 /* ---- Vista Resumen (semana / mes / año) ---- */
 let resTab='mes', resChart=null;
 function setResTab(t){ resTab=t; renderResumen(); }
+const RES_PAL=['#4f9d7d','#e0a86a','#6f8fd6','#e0615a','#c084c9','#2fb6c9','#f08a4b','#8bc34a','#e8c547','#3f7fbf','#d9658b','#79897f','#5b5fc7','#b5651d','#44b39d','#ff7f7f','#9ccc65','#d6a5e8'];
+const RES_TYPES=[['doughnut','Dona'],['pie','Pastel'],['bar','Barras'],['hbar','Horizontal'],['polarArea','Polar']];
+let resType=(state.settings&&state.settings.resChartType)||'doughnut';
+function setResType(t){ resType=t; state.settings=state.settings||{}; state.settings.resChartType=t; save(); renderResumen(); }
+function resColors(names){ const used=new Set(); return names.map((n,i)=>{ const f=findCategory(n); let c=f&&f.color; if(!c||used.has(c)){ c=RES_PAL.find(x=>!used.has(x))||('hsl('+((i*47)%360)+',60%,55%)'); } used.add(c); return c; }); }
+function makeResChart(cats,pal){
+  const bar=resType==='bar'||resType==='hbar', cs=cats.length?(bar?cats.slice(0,10):cats):[], st=getComputedStyle(document.documentElement);
+  const muted=st.getPropertyValue('--text-muted').trim()||'#888', grid=st.getPropertyValue('--card-border').trim()||'#0001';
+  const opt={responsive:true,maintainAspectRatio:false,animation:{duration:850,easing:'easeOutQuart'},plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>{ const v=bar?(resType==='hbar'?c.parsed.x:c.parsed.y):(typeof c.parsed==='object'?c.parsed.r:c.parsed); return ' '+c.label+': '+money(v); }}}}};
+  if(resType==='doughnut') opt.cutout='68%';
+  if(resType==='polarArea') opt.scales={r:{ticks:{display:false},grid:{color:grid}}};
+  if(bar){ const v=fmtShort, cat={ticks:{color:muted,font:{size:10},maxRotation:40},grid:{display:false}}, val={ticks:{color:muted,font:{size:10},callback:x=>v(x)},grid:{color:grid}};
+    if(resType==='hbar'){ opt.indexAxis='y'; opt.scales={x:val,y:cat}; } else opt.scales={x:cat,y:val}; }
+  return new Chart(document.getElementById('resCanvas').getContext('2d'),{type:bar?'bar':resType,data:{labels:cs.length?cs.map(c=>c[0]):['Sin gastos'],datasets:[{data:cs.length?cs.map(c=>c[1]):[1],backgroundColor:cs.length?pal.slice(0,cs.length):['#cccccc44'],borderWidth:resType==='pie'?2:0,borderColor:'#ffffff',borderRadius:bar?8:0}]},options:opt});
+}
 function resRange(){
   const n=nowD(); let s,ps,days,label,prev;
   if(resTab==='semana'){ s=addDays(n,-6); ps=addDays(s,-7); days=7; label='Esta semana'; prev='la semana pasada'; }
@@ -6332,25 +6358,36 @@ function resRange(){
   let pe=addDays(ps,days-1); if(resTab==='mes'){ const me=new Date(ps.getFullYear(),ps.getMonth()+1,0); if(pe>me) pe=me; }
   return {s:isoD(s),e:isoD(n),ps:isoD(ps),pe:isoD(pe),days,label,prev};
 }
+/* gastos del Resumen: gastos reales + transferencias categorizadas (ej. pago de deudas); una transferencia hacia una deuda sin categoría cuenta como «Deudas» */
+function resExpenses(){
+  const out=state.transactions.filter(isRealExpense).map(t=>({date:t.date,amount:t.amount,category:t.category}));
+  state.transactions.forEach(t=>{
+    if(t.type!=='transferencia') return;
+    const cat=t.category||(t.destKind==='deuda'?'Deudas':'');
+    if(!cat||cat==='Ahorro'||cat==='Pago tarjeta') return;
+    out.push({date:t.date,amount:t.currency==='USD'?t.amount*(state.exchangeRate||6100):t.amount,category:cat});
+  });
+  return out;
+}
 function renderResumen(){
   const box=document.getElementById('resumenBody'); if(!box || !document.getElementById('view-resumen').classList.contains('active')) return;
   if(resChart){ resChart.destroy(); resChart=null; }
   const r=resRange(), cur={}, prevT={t:0}; let total=0;
-  state.transactions.filter(isRealExpense).forEach(t=>{
+  resExpenses().forEach(t=>{
     if(t.date>=r.s&&t.date<=r.e){ total+=t.amount; cur[t.category]=(cur[t.category]||0)+t.amount; }
     else if(t.date>=r.ps&&t.date<=r.pe) prevT.t+=t.amount;
   });
   const cats=Object.entries(cur).sort((a,b)=>b[1]-a[1]), top=cats[0];
   const delta=prevT.t>0?Math.round((total-prevT.t)/prevT.t*100):null;
   const chip=delta===null?`<span class="chip-soft neutral">Sin datos de ${r.prev}</span>`:`<span class="chip-soft ${delta>0?'bad':''}">${delta>0?'<i class=ui-up></i>':'<i class=ui-down></i>'} ${Math.abs(delta)}% ${delta>0?'más':'menos'} que ${r.prev}</span>`;
-  const colorOf=(c,i)=>{ const f=findCategory(c); return f?f.color:['#4f9d7d','#e0a86a','#e0615a','#6f8fd6','#c084c9','#79897f'][i%6]; };
+  const pal=resColors(cats.map(c=>c[0])), colorOf=(c,i)=>pal[i];
   const phrase=!top?'Todavía no hay gastos en este período.':`Lo que más pesó fue <b>${escHtml(top[0])}</b> (${Math.round(top[1]/total*100)}%).`+(delta!==null?` Gastaste ${Math.abs(delta)}% ${delta>0?'más':'menos'} que ${r.prev}.`:'');
   box.innerHTML=`<div class="seg">${[['semana','Semana'],['mes','Mes'],['anio','Año']].map(([k,l])=>`<button class="${resTab===k?'on':''}" onclick="setResTab('${k}')">${l}</button>`).join('')}</div>
     <div class="card" style="margin-bottom:14px;"><div class="row-sub">Gastaste · ${r.label}</div><div class="spent-amt" style="color:var(--text);font-size:38px;">${money(total)}</div><div class="delta-row">${chip}<span class="chip-soft neutral">${money(total/r.days)} por día</span></div></div>
-    <div class="card" style="margin-bottom:14px;display:flex;gap:18px;align-items:center;flex-wrap:wrap;justify-content:center;"><div class="res-donut"><canvas id="resCanvas"></canvas><div class="res-center"><b>${top?Math.round(top[1]/total*100)+'%':'—'}</b><span>${top?'en '+escHtml(top[0]):'sin gastos'}</span></div></div>
-    <div style="flex:1;min-width:170px;display:flex;flex-direction:column;gap:9px;">${cats.slice(0,6).map(([c,v],i)=>`<div class="legend-item"><span class="legend-dot" style="background:${colorOf(c,i)}"></span><span class="lname" style="color:var(--text);font-size:14px;">${escHtml(c)}</span><span class="lval">${fmtShort(v)}</span></div>`).join('')}</div></div>
+    <div class="card" style="margin-bottom:14px;display:flex;gap:18px;align-items:center;flex-wrap:wrap;justify-content:center;"><div class="res-types">${RES_TYPES.map(([k,l])=>`<button class="${resType===k?'on':''}" onclick="setResType('${k}')">${l}</button>`).join('')}</div><div class="res-donut" data-t="${resType}" style="${resType==='hbar'?'height:'+(Math.max(5,Math.min(cats.length,10))*34+30)+'px':''}"><canvas id="resCanvas"></canvas><div class="res-center"><b>${top?Math.round(top[1]/total*100)+'%':'—'}</b><span>${top?'en '+escHtml(top[0]):'sin gastos'}</span></div></div>
+    <div style="flex:1;min-width:170px;display:flex;flex-direction:column;gap:9px;">${cats.slice(0,8).map(([c,v],i)=>`<div class="legend-item"><span class="legend-dot" style="background:${colorOf(c,i)}"></span><span class="lname" style="color:var(--text);font-size:14px;">${escHtml(c)}</span><span class="lval">${fmtShort(v)}</span></div>`).join('')}</div></div>
     <div class="card kape-card">${petStage()}<div><div class="kape-name">${escHtml(getPet().name)}</div><div class="kape-line" style="font-size:15px;">${phrase}</div></div></div>`;
-  resChart=new Chart(document.getElementById('resCanvas').getContext('2d'),{type:'doughnut',data:{labels:cats.length?cats.map(c=>c[0]):['Sin gastos'],datasets:[{data:cats.length?cats.map(c=>c[1]):[1],backgroundColor:cats.length?cats.map((c,i)=>colorOf(c[0],i)):['#cccccc44'],borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,cutout:'68%',plugins:{legend:{display:false}}}});
+  resChart=makeResChart(cats,pal);
 }
 
 /* ---- Vista Chat (misma inteligencia que el asistente flotante) ---- */
@@ -9569,6 +9606,39 @@ new MutationObserver(function(){
   var x=Math.max(-150,Math.min(m.offsetWidth+150,lx-m.offsetLeft)), y=Math.max(-150,Math.min(m.offsetHeight+150,ly-m.offsetTop));
   m.style.transformOrigin=x+'px '+y+'px';
 }).observe(ov,{attributes:true,attributeFilter:['class']});
+})();
+</script>
+<style id="fix-css">
+.res-types{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;width:100%;padding:2px 0 4px}
+.res-types::-webkit-scrollbar{display:none}
+.res-types button{flex:none;padding:7px 14px;border-radius:999px;border:1.5px solid var(--card-border);background:transparent;color:var(--text-muted);font:600 13px var(--font-n,inherit);cursor:pointer;transition:background .25s,color .25s,border-color .25s,transform .2s}
+.res-types button.on{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+.res-types button:active{transform:scale(.94)}
+.res-donut[data-t=bar],.res-donut[data-t=hbar]{width:100%;height:230px}
+.res-donut:not([data-t=doughnut]) .res-center{display:none}
+.modal,.isel-list,.overlay{overscroll-behavior:contain}
+html:has(#overlay.active),body:has(#overlay.active){overflow:hidden;overscroll-behavior:none}
+</style>
+<script id="fix-js">
+(function(){
+var ov=document.getElementById('overlay'), y0=0;
+document.addEventListener('touchstart',function(e){ y0=e.touches[0].clientY; },{passive:true});
+document.addEventListener('touchmove',function(e){
+  var open=ov&&ov.classList.contains('active'), dd=document.querySelector('.isel.open');
+  if(!open&&!dd) return;
+  var t=e.target, dy=e.touches[0].clientY-y0;
+  if(!open&&!(dd&&dd.contains(t))) return;
+  for(var n=t;n&&n!==document.body;n=n.parentElement){
+    if(open&&n===ov) break;
+    var oy=getComputedStyle(n).overflowY;
+    if((oy==='auto'||oy==='scroll')&&n.scrollHeight>n.clientHeight+1){
+      var top=n.scrollTop<=0, bot=n.scrollTop+n.clientHeight>=n.scrollHeight-1;
+      if(((dy>0&&top)||(dy<0&&bot))&&e.cancelable) e.preventDefault();
+      return;
+    }
+  }
+  if(e.cancelable) e.preventDefault();
+},{passive:false});
 })();
 </script>
 </body>
