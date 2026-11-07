@@ -8183,6 +8183,7 @@ if('serviceWorker' in navigator){
 
     function pushNow(){
       if(!user||!sb) return Promise.resolve();
+      if(!appReady()){ schedule(); return Promise.resolve(); }   /* la app principal de Wive arranca diferida */
       if(busy){ again=true; return Promise.resolve(); }
       busy=true; again=false;
       return push(sb,user.id,state,loadSnap(),function(m){ return confirm(m); }).then(function(r){
@@ -8210,8 +8211,17 @@ if('serviceWorker' in navigator){
       }catch(e){ console.error('login',e); say('No se pudo iniciar sesión con Google.'); }
     };
 
-    var _save=window.save;
-    window.save=function(){ var r=_save.apply(this,arguments); try{ schedule(); }catch(e){} return r; };
+    function appReady(){ try{ return typeof state==='object' && state!==null && typeof window.save==='function'; }catch(e){ return false; } }
+    /* Wive carga su código principal más tarde (tras la pantalla de inicio): esperamos a que exista save() para envolverlo */
+    var wrapped=false;
+    function wrapSave(){
+      if(wrapped) return true; if(!appReady()) return false;
+      var _save=window.save;
+      window.save=function(){ var r=_save.apply(this,arguments); try{ schedule(); }catch(e){} return r; };
+      wrapped=true; return true;
+    }
+    var wrapIv=setInterval(function(){ if(wrapSave()){ clearInterval(wrapIv); if(user) schedule(); } },100);
+    setTimeout(function(){ clearInterval(wrapIv); },180000);
     document.addEventListener('visibilitychange',function(){ if(document.visibilityState==='hidden'&&user){ clearTimeout(timer); pushNow(); } });
 
     function init(){
