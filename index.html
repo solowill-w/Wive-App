@@ -8205,6 +8205,7 @@ if('serviceWorker' in navigator){
         try{ await sb.auth.signOut(); }catch(e){}
         return;
       }
+      say('Conectando con Google…');
       try{
         var r=await sb.auth.signInWithOAuth({provider:'google', options:{redirectTo:location.origin+location.pathname, queryParams:{prompt:'select_account'}}});
         if(r&&r.error) throw r.error;
