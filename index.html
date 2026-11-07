@@ -6459,7 +6459,8 @@ function openLogout(){
     +'<button type="button" class="btn btn-ghost" style="width:100%;justify-content:center;" onclick="exportData()">Descargar copia de seguridad</button>',
     '<button class="btn btn-outline" onclick="closeModal()">Cancelar</button><button class="btn btn-danger" onclick="doLogout()">Cerrar sesión</button>');
 }
-function doLogout(){
+async function doLogout(){
+  try{ if(window.cloudSignOut) await window.cloudSignOut(true); }catch(e){}
   try{ Storage.prototype.setItem=function(){}; }catch(e){}
   try{ localStorage.removeItem(STORE_KEY); }catch(e){}
   try{ localStorage.removeItem('misFinanzas_setup_v1'); }catch(e){}
@@ -8195,14 +8196,29 @@ if('serviceWorker' in navigator){
     }
     function schedule(){ if(!user||!sb) return; clearTimeout(timer); timer=setTimeout(pushNow,2000); }
 
+    /* Cierre de sesión que de verdad cierra: signOut() de Supabase necesita red y, si falla, deja la sesión guardada
+       (sigues "conectado" tras recargar). Por eso, pase lo que pase, se borra también el token guardado en este dispositivo. */
+    window.cloudSignOut=async function(wipe){
+      var wait=function(ms){ return new Promise(function(r){ setTimeout(r,ms); }); };
+      if(sb&&user){
+        try{ await Promise.race([pushNow(),wait(6000)]); }catch(e){}
+        try{ await Promise.race([sb.auth.signOut(),wait(4000)]); }catch(e){}
+      }
+      try{
+        Object.keys(localStorage).forEach(function(k){
+          if(/^sb-.+-auth-token(-code-verifier)?$/.test(k) || (wipe&&k.indexOf(SNAP)===0)) localStorage.removeItem(k);
+        });
+      }catch(e){}
+      clearTimeout(timer); user=null; lastErr=''; lastOk=0;
+      try{ ui(); }catch(e){} try{ ksRender(); }catch(e){}
+    };
     window.cloudUser=function(){ return user; };
     window.cloudReady=function(){ return !!sb; };
     window.cloudToggle=async function(){
       if(!sb) return;
       if(user){
         if(!confirm('¿Cerrar sesión? Tus datos quedan guardados en la nube y en este dispositivo.')) return;
-        try{ await pushNow(); }catch(e){}
-        try{ await sb.auth.signOut(); }catch(e){}
+        await window.cloudSignOut(false);
         return;
       }
       say('Conectando con Google…');
