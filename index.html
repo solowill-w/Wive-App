@@ -4548,7 +4548,7 @@ function payCard(cardId){
   const from = state.accounts.find(a=>a.id===fromId);
   from.balance -= amount;
   card.balance = Math.max(0, card.balance - amount);
-  const tx = {id:uid(), type:'gasto', amount, date:todayISO(), category:'Pago tarjeta', description:'Pago tarjeta '+card.name, accountKind:'ahorro', accountId:from.id};
+  const tx = {id:uid(), type:'gasto', amount, date:todayISO(), category:'Pago tarjeta', description:'Pago tarjeta '+card.name, accountKind:'ahorro', accountId:from.id, cardId:card.id};
   state.transactions.push(tx);
   save(); closeModal(); renderAll();
 }
@@ -7998,149 +7998,243 @@ if('serviceWorker' in navigator){
 }
 </script>
 <script>
-/* ===== Cuenta con Google + sincronización en la nube (Firebase) =====
-   LISTO PARA ACTIVAR. Pasos para encenderlo más adelante:
-   1) Firebase > Authentication > Método de acceso: habilitar Google.
-   2) Firebase > Firestore: crear la base y poner estas reglas:
-        match /users/{uid} { allow read, write: if request.auth != null && request.auth.uid == uid; }
-   3) Pegar abajo apiKey, projectId y appId (Configuración del proyecto > Tus apps > Web).
-   4) En netlify.toml reemplazar TU-PROYECTO por el projectId (y agregar el dominio de Netlify en
-      Authentication > Configuración > Dominios autorizados).
-   Mientras apiKey esté vacío no se carga nada de Firebase y la app funciona 100 % local. */
+/* ===== Cuenta con Google + sincronización en la nube (Supabase) =====
+   Reemplaza al bloque de Firebase que estaba apagado ("Próximamente").
+   Mantiene la misma interfaz: cloudUser(), cloudReady(), cloudToggle(), #cloudInfo y #cloudBtn.
+   Sincronización de UN SOLO SENTIDO: Wive -> Supabase. Wive sigue funcionando 100 % local;
+   si no hay sesión o no hay conexión, no pasa nada y se reintenta más tarde.
+   Se sincronizan: cuentas (ahorro, inversión, ingreso extra), tarjetas, categorías y movimientos.
+   Bolsillos, deudas, metas, presupuestos, acciones y cripto siguen solo en el dispositivo. */
 (function(){
-  var FB={ apiKey:'', authDomain:location.host, projectId:'', appId:'' };
-  var SDK=['app','auth','firestore'].map(function(n){ return 'https://www.gstatic.com/firebasejs/10.12.2/firebase-'+n+'-compat.js'; });
-  var sdkFail=false;
+  var SB_URL='https://afoluhqnjnsxqzousren.supabase.co';
+  var SB_KEY='sb_publishable_Q4AfZVoXg3_CUpVloW8BgA_DMdV-C-o'; /* clave PÚBLICA; la seguridad la dan las políticas RLS */
+  var SDK='https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js';
+  var SNAP='wive_sb_snap_v1_';
+  var SYNC_KINDS={ahorro:1,inversion:1,ingreso_extra:1};
 
-  var META='wive_sync_meta', DEVK='wive_device_id';
-  var auth=null, db=null, user=null, unsub=null, timer=null, applying=false, lastPushed='';
-  var dev=(function(){ try{ var d=localStorage.getItem(DEVK); if(!d){ d=Math.random().toString(36).slice(2)+Date.now().toString(36); localStorage.setItem(DEVK,d); } return d; }catch(e){ return 'dev'; } })();
+  function r2(n){ n=+n; return isFinite(n)?Math.round(n*100)/100:0; }
+  function validDate(s){
+    if(typeof s!=='string'||!/^\d{4}-\d{2}-\d{2}/.test(s)) return null;
+    var d=s.slice(0,10), t=new Date(d+'T00:00:00Z');
+    return (!isNaN(t.getTime()) && t.toISOString().slice(0,10)===d) ? d : null;
+  }
 
-  function meta(){ try{ return JSON.parse(localStorage.getItem(META))||{}; }catch(e){ return {}; } }
-  function setMeta(m){ try{ localStorage.setItem(META,JSON.stringify(Object.assign(meta(),m))); }catch(e){} }
-  function say(t){ try{ rbxNotice(escHtml(t),'happy',4500); }catch(e){} }
-  function payload(){ var s=JSON.parse(JSON.stringify(state)); if(s.settings) delete s.settings.notif; return JSON.stringify(s); }
-  function hasData(){ var s=state; return !!((s.transactions||[]).length||(s.accounts||[]).length||(s.cards||[]).length||(s.goals||[]).length||(s.debts||[]).length||(s.pockets||[]).length||(s.stocks||[]).length||(s.cryptos||[]).length); }
-  function standalone(){ return !!(navigator.standalone || (window.matchMedia&&matchMedia('(display-mode: standalone)').matches)); }
-  function ref(){ return db.collection('users').doc(user.uid); }
+  /* ---------- Traducción del estado de Wive a filas de Supabase (función pura) ---------- */
+  function build(s){
+    var accs=[], byId={}, cardById={};
+    (s.accounts||[]).forEach(function(a){
+      if(!a||!SYNC_KINDS[a.type]) return;
+      var o={legacy_id:String(a.id), name:String(a.name||'Cuenta'), kind:a.type, card_type:null,
+             currency:a.currency==='USD'?'USD':'PYG', bank_id:a.bankId||null, cur:r2(a.balance)};
+      accs.push(o); byId[o.legacy_id]=o;
+    });
+    (s.cards||[]).forEach(function(c){
+      if(!c) return;
+      /* en Wive el saldo de la tarjeta es la deuda (positivo); en Supabase se guarda con signo (negativo) */
+      var o={legacy_id:String(c.id), name:String(c.name||'Tarjeta'), kind:'tarjeta',
+             card_type:c.cardType==='debito'?'debito':'credito', currency:'PYG',
+             bank_id:c.issuerId||null, cur:-r2(c.balance)};
+      accs.push(o); cardById[o.legacy_id]=o;
+    });
 
-  function ui(msg){
-    var info=document.getElementById('cloudInfo'), btn=document.getElementById('cloudBtn'); if(!info||!btn) return;
-    if(!FB.apiKey||sdkFail||typeof firebase==='undefined'){
-      info.textContent=!FB.apiKey?'Próximamente: iniciá sesión con Google para guardar tus datos en la nube y usarlos en otros dispositivos.':sdkFail?'No se pudo cargar el servicio de cuentas. Revisá la conexión.':'Conectando…';
-      btn.disabled=true; btn.textContent='Continuar con Google'; return;
+    var cats={};
+    (s.categories||[]).forEach(function(c){ if(c&&c.name) cats[c.name]={name:String(c.name), icon:c.icon||null, color:c.color||null}; });
+    function useCat(n){ if(!n) return null; n=String(n); if(!cats[n]) cats[n]={name:n,icon:null,color:null}; return n; }
+
+    function syncedAcc(kind,id){ var a=byId[String(id)]; return (a && (kind==='ahorro'||kind==='inversion') && a.kind===kind) ? a : null; }
+    var movs=[], eff={};
+    function bump(a,v){ eff[a.legacy_id]=(eff[a.legacy_id]||0)+v; }
+
+    (s.transactions||[]).forEach(function(t){
+      if(!t) return;
+      var m={legacy_id:String(t.id), type:null, account:null, dest:null, category:null, amount:0, dest_amount:null,
+             description:t.description?String(t.description):null, occurred_on:validDate(t.date)||'2000-01-01'};
+
+      if(t.type==='transferencia'){
+        var o=syncedAcc(t.originKind,t.originId), d=syncedAcc(t.destKind,t.destId);
+        var oa=r2(t.originAmount!=null?t.originAmount:t.amount), da=r2(t.destAmount!=null?t.destAmount:t.amount);
+        if(o&&d){
+          if(!(oa>0&&da>0)) return;
+          m.type='transferencia'; m.account=o.legacy_id; m.dest=d.legacy_id; m.amount=oa; m.dest_amount=da;
+        } else if(o){
+          if(!(oa>0)) return;
+          m.type='gasto'; m.account=o.legacy_id; m.amount=oa; m.category=useCat('Transferencia');
+        } else if(d){
+          if(!(da>0)) return;
+          m.type='ingreso'; m.account=d.legacy_id; m.amount=da; m.category=useCat('Transferencia');
+        } else return; /* entre bolsillos/deudas: no afecta a ninguna cuenta sincronizada */
+      } else if(t.type==='ingreso'||t.type==='gasto'){
+        var amt=r2(t.amount); if(!(amt>0)) return;
+        var isCard=t.accountKind==='tarjeta';
+        var acc=isCard?cardById[String(t.accountId)]:byId[String(t.accountId)];
+        if(!acc) return;
+        var card=null;
+        if(t.type==='gasto' && !isCard && t.category==='Pago tarjeta'){
+          /* un pago de tarjeta es una transferencia de la cuenta de ahorro a la tarjeta */
+          if(t.cardId && cardById[String(t.cardId)]) card=cardById[String(t.cardId)];
+          else {
+            var hits=(s.cards||[]).filter(function(c){ return c && ('Pago tarjeta '+c.name)===(t.description||''); });
+            if(hits.length===1) card=cardById[String(hits[0].id)]||null;
+          }
+        }
+        if(card){ m.type='transferencia'; m.account=acc.legacy_id; m.dest=card.legacy_id; m.amount=amt; m.dest_amount=amt; }
+        else { m.type=t.type; m.account=acc.legacy_id; m.amount=amt; m.category=useCat(t.category); }
+      } else return;
+
+      movs.push(m);
+      var A=byId[m.account]||cardById[m.account];
+      if(m.type==='ingreso') bump(A,m.amount);
+      else if(m.type==='gasto') bump(A,-m.amount);
+      else { bump(A,-m.amount); bump(byId[m.dest]||cardById[m.dest], m.dest_amount); }
+    });
+
+    /* saldo inicial = saldo actual de Wive - efecto de los movimientos
+       => el saldo que calcula Supabase siempre coincide con el que muestra Wive */
+    var accounts=accs.map(function(a){
+      return {legacy_id:a.legacy_id, name:a.name, kind:a.kind, card_type:a.card_type, currency:a.currency,
+              bank_id:a.bank_id, initial_balance:r2(a.cur-(eff[a.legacy_id]||0))};
+    });
+    var categories=Object.keys(cats).map(function(k){ return cats[k]; });
+    return {accounts:accounts, categories:categories, movements:movs};
+  }
+
+  function toMap(rows,key){ var o={}; rows.forEach(function(r){ o[r[key]]=JSON.stringify(r); }); return o; }
+  function changed(prev,next){ var k,out=[]; for(k in next) if(prev[k]!==next[k]) out.push(k); return out; }
+  function removed(prev,next){ var k,out=[]; for(k in prev) if(!(k in next)) out.push(k); return out; }
+  function chunks(a,n){ var o=[]; for(var i=0;i<a.length;i+=n) o.push(a.slice(i,i+n)); return o; }
+
+  /* ---------- Envío a Supabase ---------- */
+  function push(sb, userId, st, snap, confirmFn){
+    var d=build(st);
+    var next={accounts:toMap(d.accounts,'legacy_id'), categories:toMap(d.categories,'name'), movements:toMap(d.movements,'legacy_id')};
+    var prev=snap||{accounts:{},categories:{},movements:{},rate:null};
+    var delMov=removed(prev.movements||{},next.movements), prevCount=Object.keys(prev.movements||{}).length;
+    var delAcc=removed(prev.accounts||{},next.accounts);
+    if((delMov.length>=10 && delMov.length>prevCount*0.3) || (delAcc.length>0 && !d.accounts.length)){
+      if(!confirmFn('Se van a eliminar '+delMov.length+' movimientos y '+delAcc.length+' cuentas de la nube porque ya no están en este dispositivo.\n\n¿Continuar?'))
+        return Promise.resolve({aborted:true});
     }
-    btn.disabled=false;
-    if(user){
-      info.textContent=(msg||'Tus datos se guardan y sincronizan solos.')+' Cuenta: '+(user.email||'');
-      btn.textContent='Cerrar sesión';
-    } else {
-      info.textContent='Iniciá sesión para guardar tus datos en la nube y usarlos en otros dispositivos.';
-      btn.textContent='Continuar con Google';
-    }
-  }
+    var accByLegacy={}, catByName={};
+    function chk(r){ if(r&&r.error) throw r.error; return r; }
 
-  function applyRemote(d){
-    try{
-      var ns=JSON.parse(d.data), keep=state.settings&&state.settings.notif;
-      applying=true;
-      state=ns; if(!state.settings||typeof state.settings!=='object') state.settings={};
-      if(keep) state.settings.notif=keep;
-      migrateState();
-      localStorage.setItem(STORE_KEY,JSON.stringify(state));
-      lastPushed=payload();
-      setMeta({uid:user.uid,ts:d.updatedAt||Date.now(),dirty:false});
-      try{ renderAll(); }catch(e){}
-    }catch(e){ console.error('sync apply',e); }
-    applying=false;
-  }
-
-  async function pushNow(){
-    if(!user||!db) return;
-    var p=payload();
-    if(p.length>900000){ say('Hay demasiados datos para sincronizar. Quitá imágenes o registros viejos.'); return; }
-    var ts=Date.now();
-    try{ await ref().set({data:p,updatedAt:ts,by:dev}); lastPushed=p; setMeta({uid:user.uid,ts:ts,dirty:false}); ui(); }
-    catch(e){ console.error('sync push',e); }
-  }
-  function schedule(){
-    if(!user||!db||applying) return;
-    var p; try{ p=payload(); }catch(e){ return; }
-    if(p===lastPushed) return;
-    setMeta({dirty:true}); clearTimeout(timer); timer=setTimeout(pushNow,2500);
-  }
-
-  async function startSync(){
-    try{
-      var snap=await ref().get(), m=meta();
-      if(!snap.exists){ await pushNow(); }
-      else {
-        var d=snap.data(), rts=d.updatedAt||0;
-        if(m.uid!==user.uid){
-          if(!hasData()) applyRemote(d);
-          else if(confirm('Ya hay datos guardados en tu cuenta.\n\nAceptar: usar los datos de la nube en este dispositivo.\nCancelar: subir los datos de este dispositivo (reemplaza los de la nube).')) applyRemote(d);
-          else await pushNow();
-        } else if(m.dirty){ await pushNow(); }
-        else if(rts>(m.ts||0)){ applyRemote(d); }
-        else { lastPushed=payload(); }
-      }
-      if(unsub) unsub();
-      unsub=ref().onSnapshot(function(s){
-        if(!s.exists||s.metadata.hasPendingWrites) return;
-        var d=s.data(); if(!d||d.by===dev) return;
-        var mm=meta(); if((d.updatedAt||0)<=(mm.ts||0)||mm.dirty) return;
-        applyRemote(d);
+    return Promise.resolve().then(function(){
+      var rate=+st.exchangeRate;
+      if(rate>0 && rate!==prev.rate) return sb.from('profiles').update({usd_rate:r2(rate)}).eq('id',userId).then(chk);
+    }).then(function(){
+      var up=changed(prev.categories||{},next.categories).map(function(k){ var c=JSON.parse(next.categories[k]); c.user_id=userId; return c; });
+      if(up.length) return sb.from('categories').upsert(up,{onConflict:'user_id,name'}).then(chk);
+    }).then(function(){
+      var up=changed(prev.accounts||{},next.accounts).map(function(k){ var a=JSON.parse(next.accounts[k]); a.user_id=userId; return a; });
+      if(up.length) return sb.from('accounts').upsert(up,{onConflict:'user_id,legacy_id'}).then(chk);
+    }).then(function(){
+      return sb.from('accounts').select('id,legacy_id').then(chk).then(function(r){ (r.data||[]).forEach(function(a){ if(a.legacy_id) accByLegacy[a.legacy_id]=a.id; }); });
+    }).then(function(){
+      return sb.from('categories').select('id,name').then(chk).then(function(r){ (r.data||[]).forEach(function(c){ catByName[c.name]=c.id; }); });
+    }).then(function(){
+      return chunks(delMov,200).reduce(function(p,ids){ return p.then(function(){ return sb.from('movements').delete().in('legacy_id',ids).then(chk); }); },Promise.resolve());
+    }).then(function(){
+      var rows=[];
+      changed(prev.movements||{},next.movements).forEach(function(k){
+        var m=JSON.parse(next.movements[k]), a=accByLegacy[m.account];
+        if(!a) throw new Error('cuenta no encontrada para el movimiento '+k);
+        rows.push({user_id:userId, legacy_id:m.legacy_id, type:m.type, account_id:a,
+                   dest_account_id:m.dest?(accByLegacy[m.dest]||null):null,
+                   category_id:m.category?(catByName[m.category]||null):null,
+                   amount:m.amount, dest_amount:m.dest_amount, description:m.description, occurred_on:m.occurred_on});
       });
-      ui();
-    }catch(e){ console.error('sync start',e); ui('No se pudo sincronizar ahora.'); }
-  }
-  function stopSync(){ if(unsub){ unsub(); unsub=null; } clearTimeout(timer); }
-
-  window.cloudUser=function(){ return user; };
-  window.cloudReady=function(){ return !!auth; };
-  window.cloudToggle=async function(){
-    if(typeof firebase==='undefined'||!auth) return;
-    if(user){
-      if(!confirm('¿Cerrar sesión? Los datos quedan guardados en la nube y en este dispositivo.')) return;
-      try{ await pushNow(); }catch(e){}
-      stopSync(); try{ await auth.signOut(); }catch(e){}
-      return;
-    }
-    var prov=new firebase.auth.GoogleAuthProvider(); prov.setCustomParameters({prompt:'select_account'});
-    try{
-      if(standalone()) await auth.signInWithRedirect(prov);
-      else await auth.signInWithPopup(prov);
-    }catch(e){
-      if(e&&(e.code==='auth/popup-blocked'||e.code==='auth/operation-not-supported-in-this-environment')){ try{ await auth.signInWithRedirect(prov); return; }catch(_){} }
-      if(e&&e.code!=='auth/popup-closed-by-user'&&e.code!=='auth/cancelled-popup-request') say('No se pudo iniciar sesión con Google.');
-    }
-  };
-
-  var _save=window.save;
-  window.save=function(){ var r=_save.apply(this,arguments); try{ schedule(); }catch(e){} return r; };
-  document.addEventListener('visibilitychange',function(){ if(document.visibilityState==='hidden'&&user&&meta().dirty){ clearTimeout(timer); pushNow(); } });
-
-  function loadSDK(done){
-    var i=0;
-    (function next(){
-      if(i>=SDK.length) return done(true);
-      var sc=document.createElement('script'); sc.src=SDK[i++]; sc.onload=next; sc.onerror=function(){ done(false); };
-      document.head.appendChild(sc);
-    })();
-  }
-  function init(){
-    ui();
-    if(!FB.apiKey) return;
-    loadSDK(function(ok){
-      if(!ok){ sdkFail=true; ui(); return; }
-      try{
-        firebase.initializeApp(FB); auth=firebase.auth(); db=firebase.firestore();
-        auth.getRedirectResult().catch(function(e){ if(e&&e.code) say('No se pudo iniciar sesión con Google.'); });
-        auth.onAuthStateChanged(function(u){ user=u; ui(); try{ ksRender(); }catch(e){} if(u) startSync(); else stopSync(); });
-      }catch(e){ console.error('firebase init',e); sdkFail=true; ui(); }
+      return chunks(rows,300).reduce(function(p,c){ return p.then(function(){ return sb.from('movements').upsert(c,{onConflict:'user_id,legacy_id'}).then(chk); }); },Promise.resolve());
+    }).then(function(){
+      var ids=delAcc; if(!ids.length) return;
+      return sb.from('accounts').delete().in('legacy_id',ids).then(chk);
+    }).then(function(){
+      var ids=removed(prev.categories||{},next.categories); if(!ids.length) return;
+      return sb.from('categories').delete().in('name',ids).then(chk);
+    }).then(function(){
+      return {aborted:false, snap:{accounts:next.accounts,categories:next.categories,movements:next.movements,rate:(+st.exchangeRate>0?+st.exchangeRate:prev.rate)},
+              counts:{accounts:d.accounts.length, movements:d.movements.length}};
     });
   }
-  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
+
+  /* ---------- Interfaz y sesión (solo en el navegador) ---------- */
+  if(typeof window!=='undefined' && typeof document!=='undefined'){
+    var sb=null, user=null, sdkFail=false, timer=null, busy=false, again=false, lastErr='', lastOk=0;
+
+    function say(t){ try{ rbxNotice(escHtml(t),'happy',4500); }catch(e){} }
+    function snapKey(){ return SNAP+(user?user.id:''); }
+    function loadSnap(){ try{ return JSON.parse(localStorage.getItem(snapKey())); }catch(e){ return null; } }
+    function saveSnap(x){ try{ localStorage.setItem(snapKey(),JSON.stringify(x)); }catch(e){} }
+
+    function ui(){
+      var info=document.getElementById('cloudInfo'), btn=document.getElementById('cloudBtn'); if(!info||!btn) return;
+      if(sdkFail||typeof supabase==='undefined'||!sb){
+        info.textContent=sdkFail?'No se pudo cargar el servicio de cuentas. Revisá la conexión.':'Conectando…';
+        btn.disabled=true; btn.textContent='Continuar con Google'; return;
+      }
+      btn.disabled=false;
+      if(user){
+        var st=lastErr?('No se pudo sincronizar ahora ('+lastErr+'). Se reintenta solo.'):(lastOk?'Sincronizado con la nube.':'Sincronizando…');
+        info.textContent=st+' Cuenta: '+(user.email||'');
+        btn.textContent='Cerrar sesión';
+      } else {
+        info.textContent='Iniciá sesión con Google para guardar tus movimientos en la nube y verlos en tu tablero.';
+        btn.textContent='Continuar con Google';
+      }
+    }
+
+    function pushNow(){
+      if(!user||!sb) return Promise.resolve();
+      if(busy){ again=true; return Promise.resolve(); }
+      busy=true; again=false;
+      return push(sb,user.id,state,loadSnap(),function(m){ return confirm(m); }).then(function(r){
+        if(r&&!r.aborted){ saveSnap(r.snap); lastErr=''; lastOk=Date.now(); }
+        else if(r&&r.aborted){ lastErr='cancelado'; }
+      }).catch(function(e){
+        console.error('sync push',e); lastErr=(e&&e.message)?String(e.message).slice(0,80):'error';
+      }).then(function(){ busy=false; ui(); if(again) schedule(); });
+    }
+    function schedule(){ if(!user||!sb) return; clearTimeout(timer); timer=setTimeout(pushNow,2000); }
+
+    window.cloudUser=function(){ return user; };
+    window.cloudReady=function(){ return !!sb; };
+    window.cloudToggle=async function(){
+      if(!sb) return;
+      if(user){
+        if(!confirm('¿Cerrar sesión? Tus datos quedan guardados en la nube y en este dispositivo.')) return;
+        try{ await pushNow(); }catch(e){}
+        try{ await sb.auth.signOut(); }catch(e){}
+        return;
+      }
+      try{
+        var r=await sb.auth.signInWithOAuth({provider:'google', options:{redirectTo:location.origin+location.pathname, queryParams:{prompt:'select_account'}}});
+        if(r&&r.error) throw r.error;
+      }catch(e){ console.error('login',e); say('No se pudo iniciar sesión con Google.'); }
+    };
+
+    var _save=window.save;
+    window.save=function(){ var r=_save.apply(this,arguments); try{ schedule(); }catch(e){} return r; };
+    document.addEventListener('visibilitychange',function(){ if(document.visibilityState==='hidden'&&user){ clearTimeout(timer); pushNow(); } });
+
+    function init(){
+      ui();
+      var sc=document.createElement('script'); sc.src=SDK;
+      sc.onload=function(){
+        try{
+          sb=supabase.createClient(SB_URL,SB_KEY,{auth:{flowType:'pkce',persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+          sb.auth.onAuthStateChange(function(ev,session){
+            user=session?session.user:null; lastErr=''; lastOk=0; ui();
+            try{ ksRender(); }catch(e){}
+            if(user) setTimeout(pushNow,0);
+          });
+          ui();
+        }catch(e){ console.error('supabase init',e); sdkFail=true; ui(); }
+      };
+      sc.onerror=function(){ sdkFail=true; ui(); };
+      document.head.appendChild(sc);
+    }
+    if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
+  }
+
+  if(typeof module!=='undefined') module.exports={build:build,push:push};
 })();
 </script>
 <style>
