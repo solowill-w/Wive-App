@@ -3257,8 +3257,32 @@ function obApplyPlan(){
 }
 
 function needsSetup(){ return !state.settings.setupDone; }
+/* Borrador de la configuración inicial: sobrevive a la redirección de Google (que recarga la página) */
+const OB_DRAFT_KEY='wive_ob_draft_v1';
+function obSaveDraft(){
+  try{
+    if(ob.loginOnly || state.settings.setupDone) return;
+    const d={}; Object.keys(ob).forEach(k=>{ if(k!=='authT'&&k!=='loadT'&&k!=='loginOnly'&&typeof ob[k]!=='function') d[k]=ob[k]; });
+    localStorage.setItem(OB_DRAFT_KEY,JSON.stringify(d));
+  }catch(e){}
+}
+function obClearDraft(){ try{ localStorage.removeItem(OB_DRAFT_KEY); }catch(e){} }
+function obRestoreDraft(){
+  try{
+    const d=JSON.parse(localStorage.getItem(OB_DRAFT_KEY)||'null');
+    if(!d||typeof d!=='object') return;
+    Object.assign(ob,d); ob.loginOnly=false;
+    if(ob.step===18) ob.step=19;            /* volvió de Google: sigue con el paso que viene */
+    if(ob.step>=1 && ob.step!==25){          /* ya había elegido tema y color: se vuelven a aplicar */
+      state.settings.themeChosen=true; state.darkMode=(ob.theme==='dark'); applyTheme();
+      const oc=(typeof OB_COLORS!=='undefined')&&OB_COLORS.find(c=>c.k===ob.color);
+      if(oc){ state.settings.accent=oc.a; state.settings.base=oc.b; try{ applyColors(); }catch(e){} }
+    }
+  }catch(e){}
+}
 function showOnboarding(){
   ob={step:0,name:state.settings.userName||'',fin:'',goal:'',day:null,varies:false,cur:(state.settings.currency||'PYG'),curAll:false,income:0,fixed:{},cats:[],limit:0,plan:null,planSig:'',saveFor:'',goalAmt:0,cc:'595',phone:'',wtype:'',wName:'',wEnt:'',wBal:0,notif:false,theme:(state.darkMode?'dark':'light'),color:((typeof OB_COLORS!=='undefined'&&OB_COLORS.find(c=>c.a===state.settings.accent))||{k:'menta'}).k};
+  obRestoreDraft();
   /* primera vez: siempre empieza en claro hasta que la persona elija */
   if(!state.settings.themeChosen){ state.darkMode=false; ob.theme='light'; applyTheme(); }
   document.getElementById('onboarding').classList.add('active');
@@ -3739,6 +3763,7 @@ function obApplyWallet(){
 function obSkip(){ if(ob.step===6) ob.income=0; if(ob.step===7) ob.fixed={}; if(ob.step===19) ob.phone=''; ob.step++; obRender(); }
 function obSay9(){ const fx=obFixedSum(), r=obM(obRec()); return fx>0 ? 'Tus fijos suman '+obM(fx)+'. Te recomiendo '+r+' en total.' : 'Te recomiendo '+r+' en total.'; }
 function obRender(){
+  obSaveDraft();
   const root=document.getElementById('onboarding'), n=ob.step;
   root.dataset.step=n;
   root.classList.toggle('late',n>=18&&n!==25);
@@ -3827,6 +3852,7 @@ function finishOnboarding(){
   obApplyPlan(); obApplyWallet();
   s.setupDone=true;
   try{ localStorage.setItem('misFinanzas_setup_v1','1'); }catch(e){}
+  obClearDraft();
   save();
   document.getElementById('onboarding').classList.remove('active');
   document.getElementById('obPet').innerHTML='';
