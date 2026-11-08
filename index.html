@@ -3634,24 +3634,27 @@ function obWalletLabel(){
 }
 /* 18 · Guarda tu progreso (solo visual) */
 function obAuthHtml(){
-  const apple='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.4 12.6c0-2.3 1.9-3.4 2-3.5-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.1-2.8.9-3.5.9-.7 0-1.8-.8-3-.8-1.5 0-3 .9-3.8 2.3-1.6 2.8-.4 7 1.2 9.3.8 1.1 1.7 2.4 2.9 2.3 1.2 0 1.6-.7 3-.7s1.8.7 3 .7c1.2 0 2-1.1 2.8-2.2.9-1.3 1.2-2.5 1.2-2.6 0 0-2.4-.9-2.4-3.9zM14.2 5.8c.6-.8 1.1-1.8.9-2.8-.9 0-2 .6-2.6 1.4-.6.7-1.1 1.8-.9 2.7 1 .1 2-.5 2.6-1.3z"/></svg>';
   const google='<svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.9 2.4 30.4 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.1C12.4 13.6 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.6 5.9c4.4-4.1 7-10.1 7-17.6z"/><path fill="#FBBC05" d="M10.5 28.7c-.5-1.4-.8-3-.8-4.7s.3-3.2.8-4.7l-7.9-6.1C.9 16.4 0 20.1 0 24s.9 7.6 2.6 10.8l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.6-5.9c-2.1 1.4-4.9 2.3-8.3 2.3-6.3 0-11.6-4.1-13.5-9.8l-7.9 6.1C6.5 42.6 14.6 48 24 48z"/></svg>';
   return `<div class="ob2-auth"><h1 class="ob2-title">Guarda tu progreso</h1><p class="ob2-sub">Así podemos recordar tus cuentas, movimientos y preferencias.</p>`
-    +`<div class="ob2-authbtns"><button type="button" class="ob2-authbtn" onclick="obAuth('apple')">${apple}<span>Continuar con Apple</span></button>`
-    +`<button type="button" class="ob2-authbtn" onclick="obAuth('google')">${google}<span>Continuar con Google</span></button>`
+    +`<div class="ob2-authbtns"><button type="button" class="ob2-authbtn" onclick="obAuth('google')">${google}<span>Continuar con Google</span></button>`
     +`<button type="button" class="ob2-authbtn ghost" onclick="obAuth('none')">${ob.loginOnly?'Ahora no':'Continuar sin cuenta'}</button></div></div>`;
 }
 function obAuth(k){
-  if(ob.loginOnly){
-    if(k==='none'){ closeLoginScreen(); return; }
-    if(k==='google' && window.cloudReady && window.cloudReady()){ closeLoginScreen(); window.cloudToggle(); return; }
-    obSay('Pronto podrás guardar tu progreso en la nube. Por ahora queda en este dispositivo.','happy');
-    clearTimeout(ob.authT); ob.authT=setTimeout(closeLoginScreen,1600);
+  if(k==='none'){ if(ob.loginOnly){ closeLoginScreen(); } else { ob.step=19; obRender(); } return; }
+  /* Google: pantalla "Conectando con Google…" arriba de todo */
+  if(window.cloudReady && window.cloudReady()){
+    if(ob.loginOnly) closeLoginScreen();
+    window.cloudToggle();
     return;
   }
-  if(k==='none'){ ob.step=19; obRender(); return; }
-  obSay('Pronto podrás guardar tu progreso en la nube. Por ahora queda en este dispositivo.','happy');
-  clearTimeout(ob.authT); ob.authT=setTimeout(()=>{ if(ob.step===18){ ob.step=19; obRender(); } },1600);
+  if(window.gConnShow) window.gConnShow(1800);
+  clearTimeout(ob.authT);
+  ob.authT=setTimeout(()=>{
+    if(window.gConnHide) window.gConnHide();
+    obSay('Pronto podrás guardar tu progreso en la nube. Por ahora queda en este dispositivo.','happy');
+    if(ob.loginOnly){ setTimeout(closeLoginScreen,1600); }
+    else if(ob.step===18){ setTimeout(()=>{ if(ob.step===18){ ob.step=19; obRender(); } },1600); }
+  },1800);
 }
 /* Ajustes > Iniciar sesión: abre la misma pantalla "Guarda tu progreso" de la configuración inicial */
 function openLoginScreen(){
@@ -8221,11 +8224,11 @@ if('serviceWorker' in navigator){
         await window.cloudSignOut(false);
         return;
       }
-      say('Conectando con Google…');
+      if(window.gConnShow) window.gConnShow();
       try{
         var r=await sb.auth.signInWithOAuth({provider:'google', options:{redirectTo:location.origin+location.pathname, queryParams:{prompt:'select_account'}}});
         if(r&&r.error) throw r.error;
-      }catch(e){ console.error('login',e); say('No se pudo iniciar sesión con Google.'); }
+      }catch(e){ console.error('login',e); if(window.gConnHide) window.gConnHide(); say('No se pudo iniciar sesión con Google.'); }
     };
 
     function appReady(){ try{ return typeof state==='object' && state!==null && typeof window.save==='function'; }catch(e){ return false; } }
@@ -9756,6 +9759,32 @@ new MutationObserver(function(){
   function toBottom(){ var c=document.getElementById('chatLog'); if(c && document.body.dataset.view==='chat') c.scrollTop=c.scrollHeight; }
   new MutationObserver(function(){ [0,150,350].forEach(function(ms){ setTimeout(toBottom,ms); }); }).observe(document.body,{attributes:true,attributeFilter:['class']});
   if(window.visualViewport) visualViewport.addEventListener('resize',function(){ setTimeout(toBottom,60); });
+})();
+</script>
+
+<script>
+/* Pantalla "Conectando con Google…" (se muestra arriba de todo al iniciar sesión con Google) */
+(function(){
+  var st=document.createElement('style');
+  st.textContent='#gConn{position:fixed;inset:0;z-index:2147483000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;background:var(--bg,#0e1d1a);color:var(--text,var(--tx,#eaf2ee));text-align:center;padding:24px;opacity:0;visibility:hidden;transition:opacity .25s,visibility .25s}'
+   +'#gConn.on{opacity:1;visibility:visible}'
+   +'#gConn .gc-logo{width:76px;height:76px;border-radius:22px;background:#fff;display:grid;place-items:center;box-shadow:0 14px 40px rgba(0,0,0,.28)}'
+   +'#gConn .gc-logo svg{width:40px;height:40px}'
+   +'#gConn .gc-sp{width:34px;height:34px;border-radius:50%;border:3px solid rgba(127,154,144,.3);border-top-color:var(--accent,var(--ac,#4f9d7d));animation:gcspin .8s linear infinite}'
+   +'#gConn .gc-t{font-size:20px;font-weight:700;letter-spacing:-.01em}'
+   +'#gConn .gc-s{font-size:14px;opacity:.7;max-width:280px;line-height:1.45;margin-top:-12px}'
+   +'@keyframes gcspin{to{transform:rotate(360deg)}}';
+  document.head.appendChild(st);
+  var el=null,tm=null;
+  function build(){
+    if(el) return el;
+    el=document.createElement('div'); el.id='gConn'; el.setAttribute('role','status'); el.setAttribute('aria-live','polite');
+    el.innerHTML='<div class="gc-logo"><svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.9 2.4 30.4 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.1C12.4 13.6 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.6 5.9c4.4-4.1 7-10.1 7-17.6z"/><path fill="#FBBC05" d="M10.5 28.7c-.5-1.4-.8-3-.8-4.7s.3-3.2.8-4.7l-7.9-6.1C.9 16.4 0 20.1 0 24s.9 7.6 2.6 10.8l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.6-5.9c-2.1 1.4-4.9 2.3-8.3 2.3-6.3 0-11.6-4.1-13.5-9.8l-7.9 6.1C6.5 42.6 14.6 48 24 48z"/></svg></div><div class="gc-sp"></div><div class="gc-t">Conectando con Google…</div><div class="gc-s">Te llevaremos a Google para que elijas tu cuenta.</div>';
+    document.body.appendChild(el); return el;
+  }
+  window.gConnShow=function(ms){ build().classList.add('on'); clearTimeout(tm); tm=setTimeout(window.gConnHide,ms||20000); };
+  window.gConnHide=function(){ clearTimeout(tm); if(el) el.classList.remove('on'); };
+  window.addEventListener('pageshow',function(e){ if(e.persisted) window.gConnHide(); });
 })();
 </script>
 </body>
