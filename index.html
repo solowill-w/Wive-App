@@ -3272,7 +3272,7 @@ function obRestoreDraft(){
     const d=JSON.parse(localStorage.getItem(OB_DRAFT_KEY)||'null');
     if(!d||typeof d!=='object') return;
     Object.assign(ob,d); ob.loginOnly=false;
-    if(ob.step===18) ob.step=19;            /* volvió de Google: sigue con el paso que viene */
+    if(ob.step===18) ob.step=ob.quick?20:19;  /* volvió de Google: sigue con el paso que viene */
     if(ob.step>=1 && ob.step!==25){          /* ya había elegido tema y color: se vuelven a aplicar */
       state.settings.themeChosen=true; state.darkMode=(ob.theme==='dark'); applyTheme();
       const oc=(typeof OB_COLORS!=='undefined')&&OB_COLORS.find(c=>c.k===ob.color);
@@ -3282,6 +3282,7 @@ function obRestoreDraft(){
 }
 function showOnboarding(){
   ob={step:0,name:state.settings.userName||'',fin:'',goal:'',day:null,varies:false,cur:(state.settings.currency||'PYG'),curAll:false,income:0,fixed:{},cats:[],limit:0,plan:null,planSig:'',saveFor:'',goalAmt:0,cc:'595',phone:'',wtype:'',wName:'',wEnt:'',wBal:0,notif:false,theme:(state.darkMode?'dark':'light'),color:((typeof OB_COLORS!=='undefined'&&OB_COLORS.find(c=>c.a===state.settings.accent))||{k:'menta'}).k};
+  ob.step=18; ob.quick=true;   /* inicio: pantalla de Google; luego salta directo a crear la cuenta de ahorro */
   obRestoreDraft();
   /* primera vez: siempre empieza en claro hasta que la persona elija */
   if(!state.settings.themeChosen){ state.darkMode=false; ob.theme='light'; applyTheme(); }
@@ -3543,6 +3544,10 @@ function obReadyHtml(){
     ['color','Color',oc?oc.t:'—'],
     ['bank','Billetera',obWalletLabel()]
   ];
+  if(ob.quick){
+    return `<h1 class="ob2-title">¡Todo listo${obDisplayName()&&obDisplayName()!=='Amigo'?', '+escHtml(obDisplayName()):''}!</h1>`
+      +`<div class="ob2-sum ob2-kv"><div class="row"><span class="ic">${obIco('bank')}</span><span class="k">Cuenta de ahorro</span><span class="v">${escHtml(obWalletLabel())}</span></div></div>`;
+  }
   return `<h1 class="ob2-title">¡Tu plan está listo, ${escHtml(ob.name.trim())}!</h1>`
     +`<div class="ob2-sum ob2-kv">`+rows.map(r=>`<div class="row"><span class="ic">${obIco(r[0])}</span><span class="k">${r[1]}</span><span class="v">${escHtml(r[2])}</span></div>`).join('')+`</div>`;
 }
@@ -3664,7 +3669,7 @@ function obAuthHtml(){
     +`<button type="button" class="ob2-authbtn ghost" onclick="obAuth('none')">${ob.loginOnly?'Ahora no':'Continuar sin cuenta'}</button></div></div>`;
 }
 function obAuth(k){
-  if(k==='none'){ if(ob.loginOnly){ closeLoginScreen(); } else { ob.step=19; obRender(); } return; }
+  if(k==='none'){ if(ob.loginOnly){ closeLoginScreen(); } else { ob.quick=false; ob.startedFull=true; ob.step=0; obRender(); } return; }
   /* Google: pantalla "Conectando con Google…" arriba de todo */
   if(window.cloudReady && window.cloudReady()){
     if(ob.loginOnly) closeLoginScreen();
@@ -3677,7 +3682,7 @@ function obAuth(k){
     if(window.gConnHide) window.gConnHide();
     obSay('Pronto podrás guardar tu progreso en la nube. Por ahora queda en este dispositivo.','happy');
     if(ob.loginOnly){ setTimeout(closeLoginScreen,1600); }
-    else if(ob.step===18){ setTimeout(()=>{ if(ob.step===18){ ob.step=19; obRender(); } },1600); }
+    else if(ob.step===18){ setTimeout(()=>{ if(ob.step===18){ ob.step=ob.quick?20:19; obRender(); } },1600); }
   },1800);
 }
 /* Ajustes > Iniciar sesión: abre la misma pantalla "Guarda tu progreso" de la configuración inicial */
@@ -3769,7 +3774,7 @@ function obRender(){
   root.classList.toggle('late',n>=18&&n!==25);
   entClose();
   document.getElementById('obDots').innerHTML=Array.from({length:16},(_,i)=>`<i class="${i<=(n===25?0:n)?'on':''}"></i>`).join('');
-  document.getElementById('obBack').classList.toggle('hide',n===0);
+  document.getElementById('obBack').classList.toggle('hide',(n===0&&!ob.startedFull)||(n===18&&!ob.loginOnly));
   const body=document.getElementById('obBody');
   body.classList.remove('anim'); void body.offsetWidth; body.classList.add('anim');
   body.innerHTML=obStepHtml();
@@ -3831,20 +3836,30 @@ function obNext(){
   if(ob.step>=OB_LAST){ finishOnboarding(); return; }
   if(ob.step===20&&ob.wtype==='efectivo'){ ob.step=23; obRender(); return; }
   if(ob.step===21){ ob.step=23; obRender(); return; }
+  if(ob.step===17&&!ob.loginOnly&&ob.startedFull){ ob.step=19; obRender(); return; }
   ob.step++; obRender();
 }
 function obPrev(){
   const n=ob.step;
+  if(n===0&&ob.startedFull){ ob.step=18; obRender(); return; }
+  if(n===19&&ob.startedFull){ ob.step=17; obRender(); return; }
   if(n===25){ ob.step=0; obRender(); return; }
   if(n===1){ ob.step=25; obRender(); return; }
   if(n>0&&n<16){ ob.step--; obRender(); }
-  else if(n>=19&&n<=21){ ob.step=n-1; obRender(); }
+  else if(n>=19&&n<=21){ ob.step=(n===20&&ob.quick)?18:n-1; obRender(); }
   else if(n===23){ ob.step=ob.wtype==='efectivo'?20:21; obRender(); }
 }
+function obDisplayName(){
+  const n=(ob.name||'').trim(); if(n) return n;
+  try{ const u=window.cloudUser&&window.cloudUser(); const m=(u&&u.user_metadata)||{};
+    const g=String(m.given_name||m.full_name||m.name||'').trim().split(/\s+/)[0]; if(g) return g; }catch(e){}
+  return ob.quick?'Amigo':'';
+}
 function finishOnboarding(){
-  const name=(ob.name||'').trim();
+  const name=obDisplayName();
   if(!name){ ob.step=1; obRender(); return; }
   const s=state.settings;
+  if(ob.quick) s.themeChosen=true;
   s.userName=name; s.finance=ob.fin; s.goal=ob.goal;
   s.payDayVaries=!!ob.varies; s.payDay=ob.varies?1:(ob.day||1);
   s.pet=s.pet?petFix(s.pet):{animal:'kitty',name:'Robinix'};
