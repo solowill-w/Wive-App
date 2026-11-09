@@ -8262,6 +8262,13 @@ if('serviceWorker' in navigator){
     window.cloudToggle=async function(){
       if(!sb) return;
       if(user){
+        /* Cuadro con la estética de la app (en vez del confirm() nativo del navegador) */
+        if(typeof openModal==='function'){
+          openModal('Cerrar sesión',
+            '<p class="logout-note">'+(user.email?'Cuenta: <b>'+escHtml(user.email)+'</b><br>':'')+'Tus datos quedan guardados en la nube y en este dispositivo.</p>',
+            '<button class="btn btn-outline" onclick="closeModal()">Cancelar</button><button class="btn btn-danger" onclick="closeModal();window.cloudSignOut(false)">Cerrar sesión</button>');
+          return;
+        }
         if(!confirm('¿Cerrar sesión? Tus datos quedan guardados en la nube y en este dispositivo.')) return;
         await window.cloudSignOut(false);
         return;
