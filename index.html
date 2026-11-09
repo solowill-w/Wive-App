@@ -9836,5 +9836,46 @@ new MutationObserver(function(){
   window.addEventListener('pageshow',function(e){ if(e.persisted) window.gConnHide(); });
 })();
 </script>
+<style id="scroll-fix-final">
+/* los cuadros y listas con scroll no arrastran la pantalla de abajo */
+.modal,.modal *,.csheet,.csheet-panel,.market-grid,.isel-list,.mascot-panel,.mp-log{overscroll-behavior:contain;}
+.modal,.csheet-panel{-webkit-overflow-scrolling:touch;}
+/* con un cuadro abierto, la pantalla de abajo queda quieta */
+html.modal-open,html.modal-open body{overflow:hidden;overscroll-behavior:none;}
+/* el título es solo para arrastrar: el navegador no hace scroll desde ahí */
+#modalBox .modal-head{touch-action:none;-webkit-user-select:none;user-select:none;}
+</style>
+<script id="scroll-fix-final-js">
+(function(){
+  var ov=document.getElementById('overlay'); if(!ov) return;
+  var root=document.documentElement;
+  function sync(){ root.classList.toggle('modal-open',ov.classList.contains('active')); }
+  new MutationObserver(sync).observe(ov,{attributes:true,attributeFilter:['class']}); sync();
+  var lx=0,ly=0;
+  document.addEventListener('touchstart',function(e){ if(e.touches.length===1){ lx=e.touches[0].clientX; ly=e.touches[0].clientY; } },{passive:true,capture:true});
+  function layer(){ return ov.classList.contains('active')?ov:document.querySelector('.csheet.on'); }
+  document.addEventListener('touchmove',function(e){
+    var L=layer(); if(!L||e.touches.length!==1) return;
+    var t=e.target; if(!t||!t.closest) return;
+    var x=e.touches[0].clientX, y=e.touches[0].clientY, dx=x-lx, dy=y-ly; lx=x; ly=y;
+    /* arrastre desde el título: no debe hacer scroll de nada */
+    if(t.closest('.modal-head')){ if(e.cancelable) e.preventDefault(); return; }
+    if(t.closest('input[type=range]')) return;
+    if(Math.abs(dx)>Math.abs(dy)) return; /* gestos horizontales (chips, etc.) */
+    var el=t;
+    while(el&&el.nodeType===1){
+      var oy=getComputedStyle(el).overflowY;
+      if((oy==='auto'||oy==='scroll')&&el.scrollHeight>el.clientHeight+1){
+        var top=el.scrollTop<=0, bot=el.scrollTop+el.clientHeight>=el.scrollHeight-1;
+        if(!((dy>0&&top)||(dy<0&&bot))) return; /* todavía puede desplazarse por dentro */
+        break;
+      }
+      if(el===L) break;
+      el=el.parentNode;
+    }
+    if(e.cancelable) e.preventDefault(); /* si no puede desplazarse, no se mueve nada */
+  },{passive:false});
+})();
+</script>
 </body>
 </html>
